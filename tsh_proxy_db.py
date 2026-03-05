@@ -2,6 +2,7 @@ import subprocess
 import time
 import signal
 import sys
+from urllib.parse import urlencode
 import yaml
 
 COMPOSE_FILE = "compose.tsh.yml"
@@ -19,7 +20,6 @@ DATABASES = [
         "db_system": "pgsql",
         "db_user": "teleporteditor",
         "bridge_port": 5433,
-        "internal_port": 6433,
         "adminer_port": 8081,
     },
     {
@@ -28,7 +28,6 @@ DATABASES = [
         "db_system": "mysql",
         "db_user": "teleporteditor",
         "bridge_port": 3307,
-        "internal_port": 4307,
         "adminer_port": 8082,
     },
 ]
@@ -60,12 +59,14 @@ def generate_compose_file(databases):
 
 def start_project_tunnels(db):
     """Starts the tsh tunnel and the socat relay."""
+    hidden_port = db["bridge_port"] + 1000
+
     tsh_cmd = [
         "tsh",
         "proxy",
         "db",
         "--tunnel",
-        f"--port={db['internal_port']}",
+        f"--port={hidden_port}",
         f"--db-user={db['db_user']}",
         db["cluster"],
     ]
@@ -73,7 +74,7 @@ def start_project_tunnels(db):
     socat_cmd = [
         "socat",
         f"TCP-LISTEN:{db['bridge_port']},fork,reuseaddr",
-        f"TCP:127.0.0.1:{db['internal_port']}",
+        f"TCP:127.0.0.1:{hidden_port}",
     ]
 
     tsh_p = subprocess.Popen(
@@ -81,9 +82,17 @@ def start_project_tunnels(db):
     )
     socat_p = subprocess.Popen(socat_cmd)
 
-    adminer_url = f"http://localhost:{db['adminer_port']}/?{ADMINER_DRIVER_MAP[db['db_system']]}=host.containers.internal%3A{db['bridge_port']}&username={db['db_user']}"
+    adminer_driver = ADMINER_DRIVER_MAP[db["db_system"]]
+    query_params = urlencode(
+        {
+            adminer_driver: f"host.containers.internal:{db['bridge_port']}",
+            "username": db["db_user"],
+        }
+    )
+    adminer_url = f"http://localhost:{db['adminer_port']}/?{query_params}"
+
     print(f"  📦 {db['name']}")
-    print(f"   ├─ Tunnel: {db['bridge_port']} → {db['internal_port']}")
+    print(f"   ├─ Tunnel: {db['bridge_port']} → {hidden_port}")
     print(f"   ├─ Database: {db['db_system'].upper()} (user: {db['db_user']})")
     print(f"   └─ Adminer: {adminer_url}")
 
