@@ -2,6 +2,7 @@ import subprocess
 import time
 import signal
 import sys
+import socket
 from urllib.parse import urlencode
 import yaml
 
@@ -33,6 +34,48 @@ DATABASES = [
 ]
 
 
+def get_hidden_port(bridge_port: int) -> int:
+    return bridge_port + 1000
+
+
+def is_port_available(port, host="127.0.0.1"):
+    """Check if a port is available for binding."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    try:
+        sock.bind((host, port))
+        sock.close()
+        return True
+    except (socket.error, OSError):
+        return False
+
+
+def check_all_ports(databases):
+    """Check if all required ports are available before starting."""
+    unavailable_ports = []
+
+    for db in databases:
+        bridge_port = db["bridge_port"]
+        hidden_port = get_hidden_port(bridge_port)
+        adminer_port = db["adminer_port"]
+
+        if not is_port_available(bridge_port):
+            unavailable_ports.append((db["name"], "bridge_port", bridge_port))
+        if not is_port_available(hidden_port):
+            unavailable_ports.append((db["name"], "hidden_port", hidden_port))
+        if not is_port_available(adminer_port):
+            unavailable_ports.append((db["name"], "adminer_port", adminer_port))
+
+    if unavailable_ports:
+        print("❌ Error: The following ports are already in use:")
+        for db_name, port_type, port in unavailable_ports:
+            print(f"   • {db_name}: {port_type} ({port})")
+        print("\nPlease free these ports or update your configuration.")
+        sys.exit(1)
+
+    print("✅ All required ports are available.")
+
+
 def generate_compose_file(databases):
     """Generates a compose file based on the DATABASES list."""
     compose_dict = {"services": {}, "networks": {"adminer_net": {"driver": "bridge"}}}
@@ -59,7 +102,7 @@ def generate_compose_file(databases):
 
 def start_project_tunnels(db):
     """Starts the tsh tunnel and the socat relay."""
-    hidden_port = db["bridge_port"] + 1000
+    hidden_port = get_hidden_port(db["bridge_port"])
 
     tsh_cmd = [
         "tsh",
@@ -101,14 +144,18 @@ def start_project_tunnels(db):
 
 def run_orchestrator():
     """Main execution loop."""
-    # 1. Sync the compose file first
+    # 1. Check if all ports are available
+    print("🔍 Checking port availability...")
+    check_all_ports(DATABASES)
+
+    # 2. Sync the compose file
     generate_compose_file(DATABASES)
 
-    # 2. Start Podman Compose (optional: you can run this manually too)
+    # 3. Start Podman Compose (optional: you can run this manually too)
     print("\n🚀 Starting Adminer containers...")
     subprocess.run(["podman-compose", "-f", COMPOSE_FILE, "up", "-d"])
 
-    # 3. Start Tunnels and Relays
+    # 4. Start Tunnels and Relays
     print("\n🚀 Establishing tunnels and port forwarding...")
     all_processes = []
     for db in DATABASES:
