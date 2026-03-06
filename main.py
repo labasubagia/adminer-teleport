@@ -182,12 +182,14 @@ def start_project_tunnels(db):
     socat_p = subprocess.Popen(socat_cmd, stdout=socat_log, stderr=socat_log)
 
     adminer_driver = ADMINER_DRIVER_MAP[db["db_system"]]
-    query_params = urlencode(
-        {
-            adminer_driver: f"host.containers.internal:{db['bridge_port']}",
-            "username": db["db_user"],
-        }
-    )
+    query_map = {
+        adminer_driver: f"host.containers.internal:{db['bridge_port']}",
+        "username": db["db_user"],
+    }
+    if "db_name" in db and db["db_name"]:
+        query_map["db"] = db["db_name"]
+
+    query_params = urlencode(query_map)
     adminer_url = f"http://localhost:{db['adminer_port']}/?{query_params}"
 
     print(f"  📦 {db['name']}")
