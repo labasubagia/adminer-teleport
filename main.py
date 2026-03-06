@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import asyncio
+from typing import List, Dict, Any, Optional
 from urllib.parse import urlencode
 import yaml
 
@@ -152,7 +153,7 @@ def generate_compose_file(databases):
     print(f"✅ {COMPOSE_FILE} synchronized.")
 
 
-async def start_project_tunnels(db):
+async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Starts the tsh tunnel and the socat relay."""
     hidden_port = get_hidden_port(db["bridge_port"])
 
@@ -174,11 +175,12 @@ async def start_project_tunnels(db):
         f"TCP:127.0.0.1:{hidden_port}",
     ]
 
-    # Create output directory and open log files
+    # Create output directory and open log files with context management
     os.makedirs("output", exist_ok=True)
     tsh_log_path = f"output/{db['name']}_tsh.log"
-    tsh_log = open(tsh_log_path, "w")
     socat_log_path = f"output/{db['name']}_socat.log"
+
+    tsh_log = open(tsh_log_path, "w")
     socat_log = open(socat_log_path, "w")
     OPEN_FILE_HANDLES.extend([tsh_log, socat_log])
 
@@ -249,7 +251,7 @@ def check_command_exists(command):
         return False
 
 
-async def detect_compose_command():
+async def detect_compose_command() -> Optional[List[str]]:
     """Detect which container compose command is available."""
     # Check for docker compose (v2 plugin-style)
     try:
@@ -371,7 +373,7 @@ def filter_databases(requested_names, databases):
     return filtered_dbs
 
 
-async def cleanup_all(process_list):
+async def cleanup(process_list: List[Dict[str, Any]]) -> None:
     """Centralized cleanup function."""
     print("🛑 Shutting down containers and tunnels...")
 
@@ -406,30 +408,58 @@ async def cleanup_all(process_list):
 
     # Shut down containers
     compose_log = open("output/compose.log", "a")
-    proc = await asyncio.create_subprocess_exec(
-        *COMPOSE_CMD,
-        "-f",
-        COMPOSE_FILE,
-        "down",
-        stdout=compose_log,
-        stderr=compose_log,
-    )
     try:
+        proc = await asyncio.create_subprocess_exec(
+            *COMPOSE_CMD,
+            "-f",
+            COMPOSE_FILE,
+            "down",
+            stdout=compose_log,
+            stderr=compose_log,
+        )
         await asyncio.wait_for(proc.communicate(), timeout=30)
     except asyncio.TimeoutError:
         print("⚠️  Compose down timed out")
         proc.kill()
-    compose_log.close()
+    finally:
+        compose_log.close()
 
-    # Close file handles
+    # Close file handles asynchronously
+    close_tasks = []
     for fh in OPEN_FILE_HANDLES:
         try:
-            fh.close()
+            # Schedule file close in executor to avoid blocking
+            close_tasks.append(asyncio.get_event_loop().run_in_executor(None, fh.close))
         except Exception:
             pass
 
+    # Wait for all file closes to complete
+    if close_tasks:
+        await asyncio.gather(*close_tasks, return_exceptions=True)
 
-async def run_orchestrator(selected_databases):
+
+async def validate_processes_started(process_list: List[Dict[str, Any]]) -> bool:
+    """Validate all processes started successfully after a brief delay."""
+    print("⏳ Validating process startup...")
+    await asyncio.sleep(2)  # Give processes time to fail if there's an issue
+
+    failed_processes = []
+    for proc_info in process_list:
+        if proc_info["process"].returncode is not None:
+            failed_processes.append(proc_info)
+
+    if failed_processes:
+        print("❌ The following processes failed to start:")
+        for proc_info in failed_processes:
+            print(
+                f"   • {proc_info['type']} for {proc_info['db_name']} - check {proc_info['log_path']}"
+            )
+        return False
+
+    return True
+
+
+async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
     """Main execution loop."""
     # 0. Run pre-flight checks
     await run_preflight_checks()
@@ -453,17 +483,19 @@ async def run_orchestrator(selected_databases):
     # 3. Start Container Compose
     print("🚀 Starting Adminer containers...")
     compose_log = open("output/compose.log", "a")
-    proc = await asyncio.create_subprocess_exec(
-        *COMPOSE_CMD,
-        "-f",
-        COMPOSE_FILE,
-        "up",
-        "-d",
-        stdout=compose_log,
-        stderr=compose_log,
-    )
-    await proc.communicate()
-    compose_log.close()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *COMPOSE_CMD,
+            "-f",
+            COMPOSE_FILE,
+            "up",
+            "-d",
+            stdout=compose_log,
+            stderr=compose_log,
+        )
+        await proc.communicate()
+    finally:
+        compose_log.close()
 
     # 4. Start Tunnels and Relays
     print("🔗 Establishing tunnels and port forwarding...")
@@ -474,24 +506,12 @@ async def run_orchestrator(selected_databases):
             process_list.extend(await start_project_tunnels(db))
         except Exception as e:
             print(f"❌ Failed to start tunnels for {db['name']}: {e}")
-            await cleanup_all(process_list)
+            await cleanup(process_list)
             sys.exit(1)
 
     # 5. Validate all processes started successfully
-    print("⏳ Validating process startup...")
-    await asyncio.sleep(2)  # Give processes time to fail if there's an issue
-    failed_processes = []
-    for proc_info in process_list:
-        if proc_info["process"].returncode is not None:
-            failed_processes.append(proc_info)
-
-    if failed_processes:
-        print("❌ The following processes failed to start:")
-        for proc_info in failed_processes:
-            print(
-                f"   • {proc_info['type']} for {proc_info['db_name']} - check {proc_info['log_path']}"
-            )
-        await cleanup_all(process_list)
+    if not await validate_processes_started(process_list):
+        await cleanup(process_list)
         sys.exit(1)
 
     print("✅ Orchestrator active. Adminer instances are running.")
@@ -500,38 +520,50 @@ async def run_orchestrator(selected_databases):
     shutdown_task = None
 
     def signal_handler_sync():
-        print()
         nonlocal shutdown_task
         if shutdown_task is None:
-            shutdown_task = asyncio.create_task(cleanup_all(process_list))
+            shutdown_task = asyncio.create_task(cleanup(process_list))
 
     loop = asyncio.get_event_loop()
     loop.add_signal_handler(signal.SIGINT, signal_handler_sync)
+    loop.add_signal_handler(signal.SIGTERM, signal_handler_sync)
 
-    # Monitor processes - wait for any process to exit
-    wait_tasks = {asyncio.create_task(p["process"].wait()): p for p in process_list}
+    try:
+        # Monitor processes - wait for any process to exit
+        wait_tasks = {}
+        for proc_info in process_list:
+            task = asyncio.create_task(proc_info["process"].wait())
+            wait_tasks[task] = proc_info
 
-    # Wait for any process to complete
-    done, pending = await asyncio.wait(
-        wait_tasks.keys(), return_when=asyncio.FIRST_COMPLETED
-    )
-
-    # Check if it was triggered by Ctrl+C
-    if shutdown_task is not None:
-        # Clean shutdown via Ctrl+C - wait for cleanup to complete
-        await shutdown_task
-        sys.exit(0)
-
-    # A process failed - find which one and handle it
-    for completed_task in done:
-        proc_info = wait_tasks[completed_task]
-        exit_code = await completed_task
-        print(
-            f"❌ {proc_info['type']} process for '{proc_info['db_name']}' has failed (exit code: {exit_code})"
+        # Wait for any process to complete
+        done, pending = await asyncio.wait(
+            wait_tasks.keys(), return_when=asyncio.FIRST_COMPLETED
         )
-        print(f"   Check log file: {proc_info['log_path']}")
-        await cleanup_all(process_list)
-        sys.exit(1)
+
+        # Cancel remaining wait tasks
+        for task in pending:
+            task.cancel()
+
+        # Check if it was triggered by shutdown signal
+        if shutdown_task is not None:
+            # Clean shutdown via signal - wait for cleanup to complete
+            await shutdown_task
+            sys.exit(0)
+
+        # A process failed - find which one and handle it
+        for completed_task in done:
+            proc_info = wait_tasks[completed_task]
+            exit_code = await completed_task
+            print(
+                f"❌ {proc_info['type']} process for '{proc_info['db_name']}' has failed (exit code: {exit_code})"
+            )
+            print(f"   Check log file: {proc_info['log_path']}")
+            await cleanup(process_list)
+            sys.exit(1)
+    finally:
+        # Ensure cleanup happens even on unexpected errors
+        if shutdown_task is None:
+            await cleanup(process_list)
 
 
 if __name__ == "__main__":
