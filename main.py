@@ -535,12 +535,11 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
     """Main execution loop."""
     process_list = []
 
-    shutdown_task = None
+    is_shutdown = False
 
     def signal_handler_sync():
-        nonlocal shutdown_task
-        if shutdown_task is None:
-            shutdown_task = asyncio.create_task(cleanup(process_list))
+        nonlocal is_shutdown
+        is_shutdown = True
 
     loop = asyncio.get_event_loop()
     loop.add_signal_handler(signal.SIGINT, signal_handler_sync)
@@ -617,10 +616,8 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
             task.cancel()
 
         # Check if it was triggered by shutdown signal
-        if shutdown_task is not None:
-            # Clean shutdown via signal - wait for cleanup to complete
-            await shutdown_task
-            return  # Clean exit
+        if is_shutdown:
+            return
 
         # A process failed - find which one and handle it
         for completed_task in done:
@@ -634,9 +631,9 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
                 f"{proc_info['type']} process for '{proc_info['db_name']}' failed with exit code {exit_code}"
             )
     except Exception:
-        # Ensure cleanup happens on unexpected errors
-        await cleanup(process_list)
         raise
+    finally:
+        await cleanup(process_list)
 
 
 if __name__ == "__main__":
