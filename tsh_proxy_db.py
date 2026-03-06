@@ -3,10 +3,12 @@ import time
 import signal
 import sys
 import socket
+import json
 from urllib.parse import urlencode
 import yaml
 
 COMPOSE_FILE = "compose.tsh.yml"
+SETTINGS_FILE = "settings.json"
 COMPOSE_CMD = None  # Will be set during pre-flight checks
 
 ADMINER_DRIVER_MAP = {
@@ -14,25 +16,72 @@ ADMINER_DRIVER_MAP = {
     "mysql": "server",
 }
 
-# Your centralized project configuration
-DATABASES = [
-    {
-        "name": "kns_utils_staging",
-        "cluster": "kns-utils-staging-huawei",
-        "db_system": "pgsql",
-        "db_user": "teleporteditor",
-        "bridge_port": 5433,
-        "adminer_port": 8081,
-    },
-    {
-        "name": "db_staging_1",
-        "cluster": "db-staging-1",
-        "db_system": "mysql",
-        "db_user": "teleporteditor",
-        "bridge_port": 3307,
-        "adminer_port": 8082,
-    },
+REQUIRED_DB_FIELDS = [
+    "name",
+    "cluster",
+    "db_system",
+    "db_user",
+    "bridge_port",
+    "adminer_port",
 ]
+
+
+def load_settings():
+    """Load and validate database settings from settings.json."""
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            settings = json.load(f)
+    except FileNotFoundError:
+        print(f"❌ Error: {SETTINGS_FILE} not found")
+        print(f"   Create {SETTINGS_FILE} with your database configurations.")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"❌ Error: Invalid JSON in {SETTINGS_FILE}")
+        print(f"   {e}")
+        sys.exit(1)
+
+    if "databases" not in settings:
+        print(f"❌ Error: 'databases' key not found in {SETTINGS_FILE}")
+        sys.exit(1)
+
+    if not isinstance(settings["databases"], list):
+        print(f"❌ Error: 'databases' must be a list in {SETTINGS_FILE}")
+        sys.exit(1)
+
+    if not settings["databases"]:
+        print(f"❌ Error: No databases configured in {SETTINGS_FILE}")
+        sys.exit(1)
+
+    # Validate each database configuration
+    for idx, db in enumerate(settings["databases"]):
+        # Check required fields
+        missing_fields = [field for field in REQUIRED_DB_FIELDS if field not in db]
+        if missing_fields:
+            print(f"❌ Error: Database at index {idx} is missing required fields:")
+            for field in missing_fields:
+                print(f"   • {field}")
+            sys.exit(1)
+
+        # Validate db_system
+        if db["db_system"] not in ADMINER_DRIVER_MAP:
+            print(
+                f"❌ Error: Invalid db_system '{db['db_system']}' for database '{db['name']}'"
+            )
+            print(f"   Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}")
+            sys.exit(1)
+
+        # Validate port numbers
+        for port_field in ["bridge_port", "adminer_port"]:
+            if not isinstance(db[port_field], int) or not (
+                1 <= db[port_field] <= 65535
+            ):
+                print(
+                    f"❌ Error: Invalid {port_field} '{db[port_field]}' for database '{db['name']}'"
+                )
+                print("   Port must be an integer between 1 and 65535")
+                sys.exit(1)
+
+    return settings["databases"]
 
 
 def get_hidden_port(bridge_port: int) -> int:
@@ -251,14 +300,14 @@ def run_preflight_checks():
     print()
 
 
-def filter_databases(requested_names):
-    """Filter DATABASES based on requested names and validate they exist."""
+def filter_databases(requested_names, databases):
+    """Filter databases based on requested names and validate they exist."""
     if not requested_names:
         # No arguments provided, return all databases
-        return DATABASES
+        return databases
 
     # Create a map of database names to configs
-    db_map = {db["name"]: db for db in DATABASES}
+    db_map = {db["name"]: db for db in databases}
     available_names = list(db_map.keys())
 
     # Validate and filter
@@ -325,6 +374,9 @@ def run_orchestrator(selected_databases):
 
 
 if __name__ == "__main__":
+    # Load database settings
+    databases = load_settings()
+
     # Parse command-line arguments
     requested_db_names = []
     if len(sys.argv) > 1:
@@ -335,7 +387,7 @@ if __name__ == "__main__":
             requested_db_names.extend(names)
 
     # Filter and validate databases
-    selected_databases = filter_databases(requested_db_names)
+    selected_databases = filter_databases(requested_db_names, databases)
 
     # Run orchestrator with selected databases
     run_orchestrator(selected_databases)

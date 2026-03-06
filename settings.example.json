@@ -1,0 +1,20 @@
+{
+    "databases": [
+        {
+            "name": "example_database",
+            "cluster": "your-cluster-name",
+            "db_system": "pgsql",
+            "db_user": "your-username",
+            "bridge_port": 5433,
+            "adminer_port": 8081
+        },
+        {
+            "name": "another_database",
+            "cluster": "another-cluster-name",
+            "db_system": "mysql",
+            "db_user": "your-username",
+            "bridge_port": 3307,
+            "adminer_port": 8082
+        }
+    ]
+}

@@ -25,21 +25,36 @@ Orchestrator for running Adminer instances with Teleport database proxy tunnels.
 
 ## Configuration
 
-Edit the `DATABASES` list in `tsh_proxy_db.py` to configure your databases:
+Database configurations are stored in `settings.json` (git-ignored). Create this file from the provided template:
 
-```python
-DATABASES = [
-    {
-        "name": "kns_utils_staging",           # Unique identifier
-        "cluster": "kns-utils-staging-huawei", # Teleport database cluster name
-        "db_system": "pgsql",                  # Database type: "pgsql" or "mysql"
-        "db_user": "teleporteditor",           # Database user
-        "bridge_port": 5433,                   # Local port for database connection
-        "adminer_port": 8081,                  # Web interface port
-    },
-    # Add more databases as needed
-]
+```bash
+cp settings.example.json settings.json
 ```
+
+Then edit `settings.json` to configure your databases:
+
+```json
+{
+  "databases": [
+    {
+      "name": "kns_utils_staging",           // Unique identifier
+      "cluster": "kns-utils-staging-huawei", // Teleport database cluster name
+      "db_system": "pgsql",                  // Database type: "pgsql" or "mysql"
+      "db_user": "teleporteditor",           // Database user
+      "bridge_port": 5433,                   // Local port for database connection
+      "adminer_port": 8081                   // Web interface port
+    }
+  ]
+}
+```
+
+### Configuration Validation
+
+The script validates all database configurations on startup:
+- **Required fields**: `name`, `cluster`, `db_system`, `db_user`, `bridge_port`, `adminer_port`
+- **db_system**: Must be `pgsql` or `mysql`
+- **Port numbers**: Must be integers between 1 and 65535
+- **Unique names**: Each database must have a unique name
 
 ### Port Architecture
 
@@ -172,7 +187,24 @@ If you see port availability errors:
    • my_database
 ```
 
-Check the `DATABASES` list in the script for available database names.
+Check your `settings.json` file for available database names.
+
+### Settings File Errors
+
+**File not found:**
+```bash
+cp settings.example.json settings.json
+# Then edit settings.json with your configurations
+```
+
+**Invalid JSON:**
+Ensure your `settings.json` has valid JSON syntax (use a JSON validator).
+
+**Missing required fields:**
+Each database must have: `name`, `cluster`, `db_system`, `db_user`, `bridge_port`, `adminer_port`
+
+**Invalid db_system:**
+Only `pgsql` and `mysql` are supported.
 
 ### Container Issues
 
@@ -218,7 +250,9 @@ Add Adminer plugins to `plugins-enabled/` directory. They're automatically mount
 ```
 .
 ├── tsh_proxy_db.py              # Main orchestrator script
-├── compose.tsh.yml              # Auto-generated compose file
+├── settings.json                # Database configurations (git-ignored)
+├── settings.example.json        # Configuration template
+├── compose.tsh.yml              # Auto-generated compose file (git-ignored)
 ├── plugins-enabled/             # Adminer plugins
 │   └── login-password-less.php  # Passwordless login plugin
 └── README.md                    # This file
