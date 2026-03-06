@@ -14,6 +14,7 @@ COMPOSE_FILE = "compose.tsh.yml"
 SETTINGS_FILE = "settings.json"
 COMPOSE_CMD = None  # Will be set during pre-flight checks
 OPEN_FILE_HANDLES = []  # Track file handles for cleanup
+CLEANUP_INITIATED = False  # Track if cleanup has been called
 
 ADMINER_DRIVER_MAP = {
     "pgsql": "pgsql",
@@ -397,6 +398,13 @@ def filter_databases(requested_names, databases):
 
 async def cleanup(process_list: List[Dict[str, Any]]) -> None:
     """Centralized cleanup function."""
+    global CLEANUP_INITIATED
+
+    # Check if cleanup already called to prevent double execution
+    if CLEANUP_INITIATED:
+        return
+    CLEANUP_INITIATED = True
+
     print("🛑 Shutting down containers and tunnels...")
 
     # Terminate all processes first
@@ -540,12 +548,10 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
     print("👀 Monitoring processes for failures...")
 
     shutdown_task = None
-    shutdown_initiated = False
 
     def signal_handler_sync():
-        nonlocal shutdown_task, shutdown_initiated
-        if not shutdown_initiated:
-            shutdown_initiated = True
+        nonlocal shutdown_task
+        if shutdown_task is None:
             shutdown_task = asyncio.create_task(cleanup(process_list))
 
     loop = asyncio.get_event_loop()
@@ -569,7 +575,7 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
             task.cancel()
 
         # Check if it was triggered by shutdown signal
-        if shutdown_initiated:
+        if shutdown_task is not None:
             # Clean shutdown via signal - wait for cleanup to complete
             await shutdown_task
             sys.exit(0)
@@ -586,8 +592,7 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
             sys.exit(1)
     finally:
         # Ensure cleanup happens even on unexpected errors
-        if shutdown_task is None:
-            await cleanup(process_list)
+        await cleanup(process_list)
 
 
 if __name__ == "__main__":
