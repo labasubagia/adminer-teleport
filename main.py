@@ -4,6 +4,7 @@ import signal
 import sys
 import socket
 import json
+import os
 from urllib.parse import urlencode
 import yaml
 
@@ -161,8 +162,10 @@ def start_project_tunnels(db):
         "--tunnel",
         f"--port={hidden_port}",
         f"--db-user={db['db_user']}",
-        db["cluster"],
     ]
+    if "db_name" in db and db["db_name"]:
+        tsh_cmd.append(f"--db-name={db['db_name']}")
+    tsh_cmd.append(db["cluster"])
 
     socat_cmd = [
         "socat",
@@ -170,10 +173,13 @@ def start_project_tunnels(db):
         f"TCP:127.0.0.1:{hidden_port}",
     ]
 
-    tsh_p = subprocess.Popen(
-        tsh_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    socat_p = subprocess.Popen(socat_cmd)
+    # Create output directory and open log files
+    os.makedirs("output", exist_ok=True)
+    tsh_log = open(f"output/{db['name']}_tsh.out", "w")
+    socat_log = open(f"output/{db['name']}_socat.out", "w")
+
+    tsh_p = subprocess.Popen(tsh_cmd, stdout=tsh_log, stderr=tsh_log)
+    socat_p = subprocess.Popen(socat_cmd, stdout=socat_log, stderr=socat_log)
 
     adminer_driver = ADMINER_DRIVER_MAP[db["db_system"]]
     query_params = urlencode(

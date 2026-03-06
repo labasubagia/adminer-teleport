@@ -5,6 +5,7 @@
             "cluster": "your-cluster-name",
             "db_system": "pgsql",
             "db_user": "your-username",
+            "db_name": "optional-database-name",
             "bridge_port": 5433,
             "adminer_port": 8081
         },

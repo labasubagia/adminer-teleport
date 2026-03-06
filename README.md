@@ -41,6 +41,7 @@ Then edit `settings.json` to configure your databases:
       "cluster": "kns-utils-staging-huawei", // Teleport database cluster name
       "db_system": "pgsql",                  // Database type: "pgsql" or "mysql"
       "db_user": "teleporteditor",           // Database user
+      "db_name": "my_database",              // Database name (optional, but required by some newer Teleport versions, especially for PostgreSQL)
       "bridge_port": 5433,                   // Local port for database connection
       "adminer_port": 8081                   // Web interface port
     }
@@ -48,10 +49,13 @@ Then edit `settings.json` to configure your databases:
 }
 ```
 
+**Note**: The `db_name` field is optional but **strongly recommended**. Some newer versions of Teleport require it (especially when connecting to PostgreSQL databases). If omitted, the `--db-name` argument won't be passed to the `tsh proxy db` command.
+
 ### Configuration Validation
 
 The script validates all database configurations on startup:
 - **Required fields**: `name`, `cluster`, `db_system`, `db_user`, `bridge_port`, `adminer_port`
+- **Optional fields**: `db_name` (recommended, required by newer Teleport versions for PostgreSQL)
 - **db_system**: Must be `pgsql` or `mysql`
 - **Port numbers**: Must be integers between 1 and 65535
 - **Unique names**: Each database must have a unique name
@@ -201,7 +205,8 @@ cp settings.example.json settings.json
 Ensure your `settings.json` has valid JSON syntax (use a JSON validator).
 
 **Missing required fields:**
-Each database must have: `name`, `cluster`, `db_system`, `db_user`, `bridge_port`, `adminer_port`
+Each database must have: `name`, `cluster`, `db_system`, `db_user`, `bridge_port`, `adminer_port`  
+Optional but recommended: `db_name` (required by newer Teleport versions, especially for PostgreSQL)
 
 **Invalid db_system:**
 Only `pgsql` and `mysql` are supported.
@@ -245,6 +250,14 @@ Change the theme in `generate_compose_file()`:
 
 Add Adminer plugins to `plugins-enabled/` directory. They're automatically mounted into containers.
 
+## Logs
+
+Process logs are automatically captured in the `output/` directory:
+- `output/{database_name}_tsh.out` - Teleport tunnel logs
+- `output/{database_name}_socat.out` - socat relay logs
+
+These logs are useful for debugging connection issues or monitoring tunnel activity.
+
 ## File Structure
 
 ```
@@ -253,6 +266,9 @@ Add Adminer plugins to `plugins-enabled/` directory. They're automatically mount
 ├── settings.json                # Database configurations (git-ignored)
 ├── settings.example.json        # Configuration template
 ├── compose.tsh.yml              # Auto-generated compose file (git-ignored)
+├── output/                      # Process logs directory (git-ignored)
+│   ├── {db_name}_tsh.out       # Teleport tunnel stdout/stderr
+│   └── {db_name}_socat.out     # socat relay stdout/stderr
 ├── plugins-enabled/             # Adminer plugins
 │   └── login-password-less.php  # Passwordless login plugin
 └── README.md                    # This file
