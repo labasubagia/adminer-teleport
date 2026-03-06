@@ -69,23 +69,19 @@ def load_settings():
         with open(SETTINGS_FILE, "r") as f:
             settings = json.load(f)
     except FileNotFoundError:
-        print(f"❌ {SETTINGS_FILE} not found")
-        print(f"Create {SETTINGS_FILE} with your database configurations.")
-        raise ConfigurationError(f"{SETTINGS_FILE} not found")
+        raise ConfigurationError(
+            f"{SETTINGS_FILE} not found. Create {SETTINGS_FILE} with your database configurations."
+        )
     except json.JSONDecodeError as e:
-        print(f"❌ Invalid JSON in {SETTINGS_FILE}: {e}")
         raise ConfigurationError(f"Invalid JSON in {SETTINGS_FILE}: {e}")
 
     if "databases" not in settings:
-        print(f"❌ 'databases' key not found in {SETTINGS_FILE}")
         raise ConfigurationError(f"'databases' key not found in {SETTINGS_FILE}")
 
     if not isinstance(settings["databases"], list):
-        print(f"❌ 'databases' must be a list in {SETTINGS_FILE}")
         raise ConfigurationError(f"'databases' must be a list in {SETTINGS_FILE}")
 
     if not settings["databases"]:
-        print(f"❌ No databases configured in {SETTINGS_FILE}")
         raise ConfigurationError(f"No databases configured in {SETTINGS_FILE}")
 
     # Validate each database configuration
@@ -93,21 +89,15 @@ def load_settings():
         # Check required fields
         missing_fields = [field for field in REQUIRED_DB_FIELDS if field not in db]
         if missing_fields:
-            print(
-                f"❌ Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
-            )
             raise ConfigurationError(
                 f"Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
             )
 
         # Validate db_system
         if db["db_system"] not in ADMINER_DRIVER_MAP:
-            print(
-                f"❌ Invalid db_system '{db['db_system']}' for database '{db['name']}'. "
-                f"Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}"
-            )
             raise ConfigurationError(
-                f"Invalid db_system '{db['db_system']}' for database '{db['name']}'"
+                f"Invalid db_system '{db['db_system']}' for database '{db['name']}'. "
+                f"Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}"
             )
 
         # Validate port numbers
@@ -115,23 +105,17 @@ def load_settings():
             if not isinstance(db[port_field], int) or not (
                 1 <= db[port_field] <= 65535
             ):
-                print(
-                    f"❌ Invalid {port_field} '{db[port_field]}' for database '{db['name']}'. "
-                    f"Port must be an integer between 1 and 65535"
-                )
                 raise ConfigurationError(
-                    f"Invalid {port_field} '{db[port_field]}' for database '{db['name']}'"
+                    f"Invalid {port_field} '{db[port_field]}' for database '{db['name']}'. "
+                    f"Port must be an integer between 1 and 65535"
                 )
 
         # Validate that hidden port (bridge_port + 1000) won't overflow
         hidden_port = get_hidden_port(db["bridge_port"])
         if hidden_port > 65535:
-            print(
-                f"❌ Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}'. "
-                f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= 64535"
-            )
             raise ConfigurationError(
-                f"Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}': hidden port overflow"
+                f"Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}'. "
+                f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= 64535"
             )
 
     return settings["databases"]
@@ -170,11 +154,15 @@ def check_all_ports(databases):
             unavailable_ports.append((db["name"], "adminer_port", adminer_port))
 
     if unavailable_ports:
-        print("❌ The following ports are already in use:")
-        for db_name, port_type, port in unavailable_ports:
-            print(f"   - {db_name}: {port_type} ({port})")
-        print("Please free these ports or update your configuration.")
-        raise PortAvailabilityError("Required ports are already in use")
+        port_list = "\n".join(
+            [
+                f"   - {db_name}: {port_type} ({port})"
+                for db_name, port_type, port in unavailable_ports
+            ]
+        )
+        raise PortAvailabilityError(
+            f"The following ports are already in use:\n{port_list}\nPlease free these ports or update your configuration."
+        )
 
     print("✅ All required ports are available.")
 
@@ -400,8 +388,9 @@ async def run_preflight_checks():
             checks_passed = False
 
     if not checks_passed:
-        print("❌ Pre-flight checks failed. Please resolve the issues above.")
-        raise PreflightCheckError("Pre-flight checks failed")
+        raise PreflightCheckError(
+            "Pre-flight checks failed. Please resolve the issues above."
+        )
 
 
 def filter_databases(requested_names, databases):
@@ -425,13 +414,12 @@ def filter_databases(requested_names, databases):
             invalid_names.append(name)
 
     if invalid_names:
-        print("❌ The following database(s) do not exist in configuration:")
-        for name in invalid_names:
-            print(f"   - {name}")
-        print("Available databases:")
-        for name in available_names:
-            print(f"   - {name}")
-        raise ConfigurationError(f"Invalid database names: {', '.join(invalid_names)}")
+        invalid_list = "\n".join([f"   - {name}" for name in invalid_names])
+        available_list = "\n".join([f"   - {name}" for name in available_names])
+        raise ConfigurationError(
+            f"The following database(s) do not exist in configuration:\n{invalid_list}\n"
+            f"Available databases:\n{available_list}"
+        )
 
     return filtered_dbs
 
@@ -448,6 +436,7 @@ async def cleanup(process_list: List[Dict[str, Any]]) -> None:
     print("🛑 Shutting down containers and tunnels...")
     if not process_list:
         print("⚠️  No processes to clean up")
+        return
 
     # Terminate all processes first
     terminate_tasks = []
@@ -510,7 +499,7 @@ async def cleanup(process_list: List[Dict[str, Any]]) -> None:
         await asyncio.gather(*close_tasks, return_exceptions=True)
 
 
-async def validate_processes_started(process_list: List[Dict[str, Any]]) -> bool:
+async def validate_processes_started(process_list: List[Dict[str, Any]]) -> None:
     """Validate all processes started successfully after a brief delay."""
     print("⏳ Validating process startup...")
     await asyncio.sleep(2)  # Give processes time to fail if there's an issue
@@ -521,14 +510,15 @@ async def validate_processes_started(process_list: List[Dict[str, Any]]) -> bool
             failed_processes.append(proc_info)
 
     if failed_processes:
-        print("❌ The following processes failed to start:")
-        for proc_info in failed_processes:
-            print(
+        failed_list = "\n".join(
+            [
                 f"   • {proc_info['type']} for {proc_info['db_name']} - check {proc_info['log_path']}"
-            )
-        return False
-
-    return True
+                for proc_info in failed_processes
+            ]
+        )
+        raise ProcessStartupError(
+            f"The following processes failed to start:\n{failed_list}"
+        )
 
 
 async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
@@ -588,14 +578,12 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
             try:
                 process_list.extend(await start_project_tunnels(db))
             except Exception as e:
-                print(f"❌ Failed to start tunnels for {db['name']}: {e}")
                 raise ProcessStartupError(
                     f"Failed to start tunnels for {db['name']}: {e}"
                 )
 
-        # 5. Validate all processes started successfully
-        if not await validate_processes_started(process_list):
-            raise ProcessStartupError("Process validation failed")
+        # Validate all processes started successfully
+        await validate_processes_started(process_list)
 
         print("✅ Orchestrator active. Adminer instances are running.")
         print("👀 Monitoring processes for failures...")
@@ -623,12 +611,9 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
         for completed_task in done:
             proc_info = wait_tasks[completed_task]
             exit_code = await completed_task
-            print(
-                f"❌ {proc_info['type']} process for '{proc_info['db_name']}' has failed (exit code: {exit_code})"
-            )
-            print(f"   Check log file: {proc_info['log_path']}")
             raise ProcessStartupError(
-                f"{proc_info['type']} process for '{proc_info['db_name']}' failed with exit code {exit_code}"
+                f"{proc_info['type']} process for '{proc_info['db_name']}' failed with exit code {exit_code}. "
+                f"Check log file: {proc_info['log_path']}"
             )
     except Exception:
         raise
@@ -656,8 +641,8 @@ if __name__ == "__main__":
         # Run orchestrator with selected databases
         asyncio.run(run_orchestrator(selected_databases))
         sys.exit(0)
-    except OrchestratorError:
-        # Expected errors already printed detailed messages
+    except OrchestratorError as e:
+        print(f"❌ {e}")
         sys.exit(1)
     except KeyboardInterrupt:
         # User interrupted - already handled by signal handler
@@ -668,3 +653,5 @@ if __name__ == "__main__":
 
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        print("👋 Finished!")
