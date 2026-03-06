@@ -14,14 +14,27 @@ Orchestrator for running Adminer instances with Teleport database proxy tunnels.
 
 ## Prerequisites
 
-- Python 3.6+
+- Python 3.13+ (managed via [uv](https://docs.astral.sh/uv/))
+- [uv](https://docs.astral.sh/uv/) for Python environment and dependency management
 - [Teleport](https://goteleport.com/) (`tsh` CLI tool)
 - Container runtime with compose: **one of the following:**
   - [Docker](https://www.docker.com/) with `docker compose` (v2 plugin)
   - [Podman](https://podman.io/) with `podman-compose`
   - `docker-compose` (v1 standalone)
 - `socat` for port forwarding
-- PyYAML package: `pip install pyyaml`
+
+## Installation
+
+Sync dependencies using uv:
+
+```bash
+uv sync
+```
+
+This will:
+- Create a virtual environment in `.venv/`
+- Install Python 3.13 (if not already available)
+- Install all dependencies from `pyproject.toml`
 
 ## Configuration
 
@@ -80,24 +93,24 @@ Each database uses three ports:
 ### Run All Databases
 
 ```bash
-python main.py
+uv run main.py
 ```
 
 ### Run Specific Databases
 
 Space-separated:
 ```bash
-python main.py example_database another_database
+uv run main.py example_database another_database
 ```
 
 Comma-separated:
 ```bash
-python main.py example_database,another_database
+uv run main.py example_database,another_database
 ```
 
 Single database:
 ```bash
-python main.py example_database
+uv run main.py example_database
 ```
 
 ### Access Adminer
