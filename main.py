@@ -125,11 +125,10 @@ def get_hidden_port(bridge_port: int) -> int:
 
 def is_port_available(port, host="127.0.0.1"):
     """Check if a port is available for binding."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
     try:
-        sock.bind((host, port))
-        sock.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            sock.bind((host, port))
         return True
     except (socket.error, OSError):
         return False
@@ -211,7 +210,8 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
         f"TCP:127.0.0.1:{hidden_port}",
     ]
 
-    # Create output directory and open log files with context management
+    # Create output directory and open log files
+    # Note: Files remain open and are closed later in cleanup()
     os.makedirs("output", exist_ok=True)
 
     tsh_log_path = f"output/{db['name']}_tsh.log"
@@ -335,8 +335,16 @@ async def run_preflight_checks():
         print("❌ No container compose tool found")
         print("   Install one of: docker compose, podman-compose, or docker-compose")
         checks_passed = False
+
+    # Check tsh installation and login status
     if check_command_exists("tsh"):
         print("✅ tsh is installed")
+        if check_tsh_logged_in():
+            print("✅ Logged in to Teleport")
+        else:
+            print("❌ Not logged in to Teleport")
+            print("   Log in with: tsh login --proxy=your-proxy.teleport.sh")
+            checks_passed = False
     else:
         print("❌ tsh is not installed")
         print("   Install Teleport: https://goteleport.com/docs/installation/")
@@ -350,15 +358,6 @@ async def run_preflight_checks():
         print("   Install with: sudo apt install socat  # or brew install socat")
         checks_passed = False
 
-    # Check tsh login status
-    if check_command_exists("tsh"):
-        if check_tsh_logged_in():
-            print("✅ Logged in to Teleport")
-        else:
-            print("❌ Not logged in to Teleport")
-            print("   Log in with: tsh login --proxy=your-proxy.teleport.sh")
-            checks_passed = False
-
     if not checks_passed:
         raise PreflightCheckError(
             "Pre-flight checks failed. Please resolve the issues above."
@@ -368,26 +367,17 @@ async def run_preflight_checks():
 def filter_databases(requested_names, databases):
     """Filter databases based on requested names and validate they exist."""
     if not requested_names:
-        # No arguments provided, return all databases
         return databases
 
-    # Create a map of database names to configs
     db_map = {db["name"]: db for db in databases}
-    available_names = list(db_map.keys())
 
-    # Validate and filter
-    filtered_dbs = []
-    invalid_names = []
-
-    for name in requested_names:
-        if name in db_map:
-            filtered_dbs.append(db_map[name])
-        else:
-            invalid_names.append(name)
+    # Separate valid and invalid names using list comprehensions
+    filtered_dbs = [db_map[name] for name in requested_names if name in db_map]
+    invalid_names = [name for name in requested_names if name not in db_map]
 
     if invalid_names:
         invalid_list = "\n".join([f"   - {name}" for name in invalid_names])
-        available_list = "\n".join([f"   - {name}" for name in available_names])
+        available_list = "\n".join([f"   - {name}" for name in db_map])
         raise ConfigurationError(
             f"The following database(s) do not exist in configuration:\n{invalid_list}\n"
             f"Available databases:\n{available_list}"
@@ -487,6 +477,7 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
     """Main execution loop."""
 
     is_shutdown = False
+    process_list = []
 
     def signal_handler_sync():
         nonlocal is_shutdown
@@ -533,7 +524,6 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
         # Start Tunnels and Relays
         print("🔗 Establishing tunnels and port forwarding...")
 
-        process_list = []
         for db in selected_databases:
             try:
                 process_list.extend(await start_project_tunnels(db))
