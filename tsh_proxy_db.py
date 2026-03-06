@@ -142,6 +142,74 @@ def start_project_tunnels(db):
     return [tsh_p, socat_p]
 
 
+def check_command_exists(command):
+    """Check if a command is available in the system."""
+    try:
+        subprocess.run(
+            ["which", command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
+def check_tsh_logged_in():
+    """Check if user is logged in to Teleport."""
+    try:
+        result = subprocess.run(
+            ["tsh", "status"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+        # tsh status returns 0 if logged in, non-zero otherwise
+        return result.returncode == 0
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
+def run_preflight_checks():
+    """Verify all prerequisites before starting the orchestrator."""
+    print("🔍 Running pre-flight checks...\n")
+
+    checks_passed = True
+
+    # Check tsh installation
+    if check_command_exists("tsh"):
+        print("✅ tsh is installed")
+    else:
+        print("❌ tsh is not installed")
+        print("   Install Teleport: https://goteleport.com/docs/installation/")
+        checks_passed = False
+
+    # Check socat installation
+    if check_command_exists("socat"):
+        print("✅ socat is installed")
+    else:
+        print("❌ socat is not installed")
+        print("   Install with: sudo apt install socat  # or brew install socat")
+        checks_passed = False
+
+    # Check tsh login status
+    if check_command_exists("tsh"):
+        if check_tsh_logged_in():
+            print("✅ Logged in to Teleport")
+        else:
+            print("❌ Not logged in to Teleport")
+            print("   Log in with: tsh login --proxy=your-proxy.teleport.sh")
+            checks_passed = False
+
+    if not checks_passed:
+        print("\n❌ Pre-flight checks failed. Please resolve the issues above.")
+        sys.exit(1)
+
+    print()
+
+
 def filter_databases(requested_names):
     """Filter DATABASES based on requested names and validate they exist."""
     if not requested_names:
@@ -176,6 +244,9 @@ def filter_databases(requested_names):
 
 def run_orchestrator(selected_databases):
     """Main execution loop."""
+    # 0. Run pre-flight checks
+    run_preflight_checks()
+
     print(
         f"📋 Selected databases: {', '.join([db['name'] for db in selected_databases])}\n"
     )

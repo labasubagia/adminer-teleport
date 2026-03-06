@@ -83,13 +83,14 @@ Click the Adminer URL or navigate to it in your browser.
 
 ## How It Works
 
-1. **Port Check**: Validates all required ports are available
-2. **Compose Generation**: Creates `compose.tsh.yml` with Adminer container configs
-3. **Container Startup**: Launches Adminer containers via podman-compose
-4. **Tunnel Creation**: For each database:
+1. **Pre-flight Checks**: Verifies `tsh` and `socat` are installed, and Teleport is logged in
+2. **Port Check**: Validates all required ports are available
+3. **Compose Generation**: Creates `compose.tsh.yml` with Adminer container configs
+4. **Container Startup**: Launches Adminer containers via podman-compose
+5. **Tunnel Creation**: For each database:
    - Starts `tsh proxy db --tunnel` on hidden_port
    - Starts `socat` relay forwarding bridge_port → hidden_port
-5. **Ready**: Adminer instances are accessible via web browser
+6. **Ready**: Adminer instances are accessible via web browser
 
 ### Architecture Diagram
 
@@ -109,6 +110,30 @@ Press `Ctrl+C` to gracefully shutdown:
 - Cleans up resources
 
 ## Troubleshooting
+
+### Pre-flight Check Failures
+
+If you see errors during pre-flight checks:
+
+**tsh not installed:**
+```bash
+# Install Teleport
+# See: https://goteleport.com/docs/installation/
+```
+
+**socat not installed:**
+```bash
+# Ubuntu/Debian
+sudo apt install socat
+
+# macOS
+brew install socat
+```
+
+**Not logged in to Teleport:**
+```bash
+tsh login --proxy=your-proxy.teleport.sh
+```
 
 ### Port Already in Use
 
@@ -131,13 +156,6 @@ If you see port availability errors:
 ```
 
 Check the `DATABASES` list in the script for available database names.
-
-### Teleport Authentication
-
-Ensure you're logged in to Teleport:
-```bash
-tsh login --proxy=your-proxy.teleport.sh
-```
 
 ### Container Issues
 
