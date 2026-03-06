@@ -6,8 +6,9 @@ import json
 import os
 import shutil
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TextIO
 from urllib.parse import urlencode
+from dataclasses import dataclass
 import yaml
 
 
@@ -32,6 +33,30 @@ class PreflightCheckError(OrchestratorError):
     """Raised when preflight checks fail."""
 
 
+@dataclass
+class Database:
+    """Database configuration."""
+
+    name: str
+    cluster: str
+    db_system: str
+    db_user: str
+    bridge_port: int
+    adminer_port: int
+    db_name: Optional[str] = None
+
+
+@dataclass
+class ProcessInfo:
+    """Information about a running process."""
+
+    process: asyncio.subprocess.Process
+    db_name: str
+    type: str
+    log_path: str
+    log_file: TextIO
+
+
 COMPOSE_FILE = "compose.tsh.yml"
 SETTINGS_FILE = "settings.json"
 COMPOSE_CMD = None  # Will be set during pre-flight checks
@@ -54,7 +79,9 @@ REQUIRED_DB_FIELDS = [
 
 def validate_database_config(db: Dict[str, Any], idx: int) -> None:
     """Validate a single database configuration."""
-    missing_fields = [field for field in REQUIRED_DB_FIELDS if field not in db]
+    missing_fields = [
+        field_name for field_name in REQUIRED_DB_FIELDS if field_name not in db
+    ]
     if missing_fields:
         raise ConfigurationError(
             f"Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
@@ -81,7 +108,7 @@ def validate_database_config(db: Dict[str, Any], idx: int) -> None:
         )
 
 
-def load_settings():
+def load_settings() -> List[Database]:
     """Load and validate database settings from settings.json."""
     try:
         with open(SETTINGS_FILE, "r") as f:
@@ -102,35 +129,47 @@ def load_settings():
     if not settings["databases"]:
         raise ConfigurationError(f"No databases configured in {SETTINGS_FILE}")
 
-    for idx, db in enumerate(settings["databases"]):
-        validate_database_config(db, idx)
+    databases = []
+    for idx, db_dict in enumerate(settings["databases"]):
+        validate_database_config(db_dict, idx)
+        databases.append(
+            Database(
+                name=db_dict["name"],
+                cluster=db_dict["cluster"],
+                db_system=db_dict["db_system"],
+                db_user=db_dict["db_user"],
+                bridge_port=db_dict["bridge_port"],
+                adminer_port=db_dict["adminer_port"],
+                db_name=db_dict.get("db_name"),
+            )
+        )
 
-    return settings["databases"]
+    return databases
 
 
 def get_hidden_port(bridge_port: int) -> int:
     return bridge_port + HIDDEN_PORT_OFFSET
 
 
-def build_adminer_url(db: Dict[str, Any]) -> str:
+def build_adminer_url(db: Database) -> str:
     """Build the Adminer URL with query parameters for the database."""
-    adminer_driver = ADMINER_DRIVER_MAP[db["db_system"]]
+    adminer_driver = ADMINER_DRIVER_MAP[db.db_system]
     query_map = {
-        adminer_driver: f"host.containers.internal:{db['bridge_port']}",
-        "username": db["db_user"],
+        adminer_driver: f"host.containers.internal:{db.bridge_port}",
+        "username": db.db_user,
     }
-    if "db_name" in db and db["db_name"]:
-        query_map["db"] = db["db_name"]
+    if db.db_name:
+        query_map["db"] = db.db_name
 
     query_params = urlencode(query_map)
-    return f"http://localhost:{db['adminer_port']}/?{query_params}"
+    return f"http://localhost:{db.adminer_port}/?{query_params}"
 
 
-def print_database_info(db: Dict[str, Any], hidden_port: int, adminer_url: str) -> None:
+def print_database_info(db: Database, hidden_port: int, adminer_url: str) -> None:
     """Print connection information for a database."""
-    print(f"🔗 [{db['name']}]")
-    print(f"   - Tunnel: {db['bridge_port']} → {hidden_port}")
-    print(f"   - Database: {db['db_system'].upper()} (user: {db['db_user']})")
+    print(f"🔗 [{db.name}]")
+    print(f"   - Tunnel: {db.bridge_port} → {hidden_port}")
+    print(f"   - Database: {db.db_system.upper()} (user: {db.db_user})")
     print(f"   - Adminer: {adminer_url}")
 
 
@@ -145,19 +184,19 @@ def is_port_available(port, host="127.0.0.1"):
         return False
 
 
-def check_all_ports(databases):
+def check_all_ports(databases: List[Database]) -> None:
     """Check if all required ports are available before starting."""
     unavailable_ports = []
 
     for db in databases:
         ports_to_check = [
-            ("bridge_port", db["bridge_port"]),
-            ("hidden_port", get_hidden_port(db["bridge_port"])),
-            ("adminer_port", db["adminer_port"]),
+            ("bridge_port", db.bridge_port),
+            ("hidden_port", get_hidden_port(db.bridge_port)),
+            ("adminer_port", db.adminer_port),
         ]
         for port_type, port in ports_to_check:
             if not is_port_available(port):
-                unavailable_ports.append((db["name"], port_type, port))
+                unavailable_ports.append((db.name, port_type, port))
 
     if unavailable_ports:
         port_list = "\n".join(
@@ -171,19 +210,19 @@ def check_all_ports(databases):
     print("✅ All required ports are available.")
 
 
-def generate_compose_file(databases):
+def generate_compose_file(databases: List[Database]) -> None:
     """Generates a compose file based on the DATABASES list."""
     compose_dict = {"services": {}, "networks": {"adminer_net": {"driver": "bridge"}}}
 
     for db in databases:
-        service_name = db["name"].replace("-", "_")
+        service_name = db.name.replace("-", "_")
         compose_dict["services"][service_name] = {
             "image": "adminer",
             "restart": "unless-stopped",
-            "ports": [f"{db['adminer_port']}:8080"],
+            "ports": [f"{db.adminer_port}:8080"],
             "environment": {
                 "ADMINER_DESIGN": "hever",
-                "ADMINER_DEFAULT_SERVER": f"host.containers.internal:{db['bridge_port']}",
+                "ADMINER_DEFAULT_SERVER": f"host.containers.internal:{db.bridge_port}",
             },
             "volumes": ["./plugins-enabled:/var/www/html/plugins-enabled:ro"],
             "extra_hosts": ["host.containers.internal:host-gateway"],
@@ -195,9 +234,9 @@ def generate_compose_file(databases):
     print(f"✅ {COMPOSE_FILE} synchronized.")
 
 
-async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
+async def start_project_tunnels(db: Database) -> List[ProcessInfo]:
     """Starts the tsh tunnel and the socat relay."""
-    hidden_port = get_hidden_port(db["bridge_port"])
+    hidden_port = get_hidden_port(db.bridge_port)
 
     # Build tsh command
     tsh_cmd = [
@@ -206,16 +245,16 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
         "db",
         "--tunnel",
         f"--port={hidden_port}",
-        f"--db-user={db['db_user']}",
+        f"--db-user={db.db_user}",
     ]
-    if "db_name" in db and db["db_name"]:
-        tsh_cmd.append(f"--db-name={db['db_name']}")
-    tsh_cmd.append(db["cluster"])
+    if db.db_name:
+        tsh_cmd.append(f"--db-name={db.db_name}")
+    tsh_cmd.append(db.cluster)
 
     # Build socat command
     socat_cmd = [
         "socat",
-        f"TCP-LISTEN:{db['bridge_port']},fork,reuseaddr",
+        f"TCP-LISTEN:{db.bridge_port},fork,reuseaddr",
         f"TCP:127.0.0.1:{hidden_port}",
     ]
 
@@ -223,8 +262,8 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Note: Files remain open and are closed later in cleanup()
     os.makedirs("output", exist_ok=True)
 
-    tsh_log_path = f"output/{db['name']}_tsh.log"
-    socat_log_path = f"output/{db['name']}_socat.log"
+    tsh_log_path = f"output/{db.name}_tsh.log"
+    socat_log_path = f"output/{db.name}_socat.log"
 
     tsh_log = open(tsh_log_path, "w")
     socat_log = open(socat_log_path, "w")
@@ -248,20 +287,20 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
     print_database_info(db, hidden_port, adminer_url)
 
     return [
-        {
-            "process": tsh_p,
-            "db_name": db["name"],
-            "type": "tsh",
-            "log_path": tsh_log_path,
-            "log_file": tsh_log,
-        },
-        {
-            "process": socat_p,
-            "db_name": db["name"],
-            "type": "socat",
-            "log_path": socat_log_path,
-            "log_file": socat_log,
-        },
+        ProcessInfo(
+            process=tsh_p,
+            db_name=db.name,
+            type="tsh",
+            log_path=tsh_log_path,
+            log_file=tsh_log,
+        ),
+        ProcessInfo(
+            process=socat_p,
+            db_name=db.name,
+            type="socat",
+            log_path=socat_log_path,
+            log_file=socat_log,
+        ),
     ]
 
 
@@ -364,12 +403,14 @@ async def run_preflight_checks():
         )
 
 
-def filter_databases(requested_names, databases):
+def filter_databases(
+    requested_names: List[str], databases: List[Database]
+) -> List[Database]:
     """Filter databases based on requested names and validate they exist."""
     if not requested_names:
         return databases
 
-    db_map = {db["name"]: db for db in databases}
+    db_map = {db.name: db for db in databases}
 
     filtered_dbs = [db_map[name] for name in requested_names if name in db_map]
     invalid_names = [name for name in requested_names if name not in db_map]
@@ -385,11 +426,11 @@ def filter_databases(requested_names, databases):
     return filtered_dbs
 
 
-async def force_kill_process(proc_info: Dict[str, Any]) -> None:
+async def force_kill_process(proc_info: ProcessInfo) -> None:
     """Force kill a process that didn't terminate gracefully."""
-    p = proc_info["process"]
+    p = proc_info.process
     if p.returncode is None:
-        print(f"⚠️  Force killing {proc_info['type']} for {proc_info['db_name']}")
+        print(f"⚠️  Force killing {proc_info.type} for {proc_info.db_name}")
         p.kill()
         try:
             await asyncio.wait_for(p.wait(), timeout=2)
@@ -397,7 +438,7 @@ async def force_kill_process(proc_info: Dict[str, Any]) -> None:
             pass
 
 
-async def cleanup(process_list: List[Dict[str, Any]]) -> None:
+async def cleanup(process_list: List[ProcessInfo]) -> None:
     """Centralized cleanup function."""
     print("🛑 Shutting down containers and tunnels...")
 
@@ -408,7 +449,7 @@ async def cleanup(process_list: List[Dict[str, Any]]) -> None:
     # Terminate all processes
     terminate_tasks = []
     for proc_info in process_list:
-        p = proc_info["process"]
+        p = proc_info.process
         if p.returncode is None:
             p.terminate()
             terminate_tasks.append(p.wait())
@@ -429,11 +470,10 @@ async def cleanup(process_list: List[Dict[str, Any]]) -> None:
 
     # Close log file handles
     for proc_info in process_list:
-        if "log_file" in proc_info:
-            try:
-                proc_info["log_file"].close()
-            except Exception:
-                pass
+        try:
+            proc_info.log_file.close()
+        except Exception:
+            pass
 
     # Shut down containers
     if COMPOSE_CMD:
@@ -455,7 +495,7 @@ async def cleanup(process_list: List[Dict[str, Any]]) -> None:
                 print(f"⚠️  Error during compose down: {e}")
 
 
-async def validate_processes_started(process_list: List[Dict[str, Any]]) -> None:
+async def validate_processes_started(process_list: List[ProcessInfo]) -> None:
     """Validate all processes started successfully after a brief delay."""
     print("⏳ Validating process startup...")
     await asyncio.sleep(2)
@@ -463,12 +503,12 @@ async def validate_processes_started(process_list: List[Dict[str, Any]]) -> None
     failed_processes = [
         proc_info
         for proc_info in process_list
-        if proc_info["process"].returncode is not None
+        if proc_info.process.returncode is not None
     ]
 
     if failed_processes:
         failed_list = "\n".join(
-            f"   • {proc_info['type']} for {proc_info['db_name']} - check {proc_info['log_path']}"
+            f"   • {proc_info.type} for {proc_info.db_name} - check {proc_info.log_path}"
             for proc_info in failed_processes
         )
         raise ProcessStartupError(
@@ -476,11 +516,11 @@ async def validate_processes_started(process_list: List[Dict[str, Any]]) -> None
         )
 
 
-async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
+async def run_orchestrator(selected_databases: List[Database]) -> None:
     """Main execution loop."""
 
     is_shutdown = False
-    process_list = []
+    process_list: List[ProcessInfo] = []
 
     def signal_handler_sync():
         nonlocal is_shutdown
@@ -500,7 +540,7 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
         os.makedirs("output")
 
         print(
-            f"📦 Selected databases: {', '.join([db['name'] for db in selected_databases])}"
+            f"📦 Selected databases: {', '.join([db.name for db in selected_databases])}"
         )
 
         # Check if all ports are available
@@ -531,9 +571,7 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
             try:
                 process_list.extend(await start_project_tunnels(db))
             except Exception as e:
-                raise ProcessStartupError(
-                    f"Failed to start tunnels for {db['name']}: {e}"
-                )
+                raise ProcessStartupError(f"Failed to start tunnels for {db.name}: {e}")
 
         # Validate all processes started successfully
         await validate_processes_started(process_list)
@@ -544,7 +582,7 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
         # Monitor processes - wait for any process to exit
         wait_tasks = {}
         for proc_info in process_list:
-            task = asyncio.create_task(proc_info["process"].wait())
+            task = asyncio.create_task(proc_info.process.wait())
             wait_tasks[task] = proc_info
 
         # Wait for any process to complete
@@ -565,8 +603,8 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
             proc_info = wait_tasks[completed_task]
             exit_code = await completed_task
             raise OrchestratorError(
-                f"{proc_info['type']} process for '{proc_info['db_name']}' failed with exit code {exit_code}. "
-                f"Check log file: {proc_info['log_path']}"
+                f"{proc_info.type} process for '{proc_info.db_name}' failed with exit code {exit_code}. "
+                f"Check log file: {proc_info.log_path}"
             )
     except Exception as e:
         print(f"❌ {e}")
