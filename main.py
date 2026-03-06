@@ -99,7 +99,6 @@ class ProcessInfo:
     process: asyncio.subprocess.Process
     db_name: str
     type: str
-    log_path: str
     log_file: TextIO
 
 
@@ -300,14 +299,12 @@ async def start_project_tunnels(db: Database) -> List[ProcessInfo]:
             process=tsh_p,
             db_name=db.name,
             type="tsh",
-            log_path=tsh_log_path,
             log_file=tsh_log,
         ),
         ProcessInfo(
             process=socat_p,
             db_name=db.name,
             type="socat",
-            log_path=socat_log_path,
             log_file=socat_log,
         ),
     ]
@@ -518,7 +515,7 @@ async def validate_processes_started(process_list: List[ProcessInfo]) -> None:
 
     if failed_processes:
         failed_list = "\n".join(
-            f"   • {proc_info.type} for {proc_info.db_name} - check {proc_info.log_path}"
+            f"   • {proc_info.type} for {proc_info.db_name} - check {proc_info.log_file.name}"
             for proc_info in failed_processes
         )
         raise ProcessStartupError(
@@ -615,7 +612,7 @@ async def run_orchestrator(selected_databases: List[Database]) -> None:
             exit_code = await completed_task
             raise OrchestratorError(
                 f"{proc_info.type} process for '{proc_info.db_name}' failed with exit code {exit_code}. "
-                f"Check log file: {proc_info.log_path}"
+                f"Check log file: {proc_info.log_file.name}"
             )
     except Exception as e:
         print(f"❌ {e}")
