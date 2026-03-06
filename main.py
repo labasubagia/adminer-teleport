@@ -45,6 +45,52 @@ class Database:
     adminer_port: int
     db_name: Optional[str] = None
 
+    def __post_init__(self):
+        """Validate database configuration after initialization."""
+        if self.db_system not in ADMINER_DRIVER_MAP:
+            raise ConfigurationError(
+                f"Invalid db_system '{self.db_system}' for database '{self.name}'. "
+                f"Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}"
+            )
+
+        for port_field, port_value in [
+            ("bridge_port", self.bridge_port),
+            ("adminer_port", self.adminer_port),
+        ]:
+            if not isinstance(port_value, int) or not (1 <= port_value <= 65535):
+                raise ConfigurationError(
+                    f"Invalid {port_field} '{port_value}' for database '{self.name}'. "
+                    f"Port must be an integer between 1 and 65535"
+                )
+
+        hidden_port = get_hidden_port(self.bridge_port)
+        if hidden_port > 65535:
+            raise ConfigurationError(
+                f"Invalid bridge_port '{self.bridge_port}' for database '{self.name}'. "
+                f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= {65535 - HIDDEN_PORT_OFFSET}"
+            )
+
+    @classmethod
+    def from_dict(cls, db_dict: Dict[str, Any], idx: int) -> "Database":
+        """Create a Database instance from a dictionary with validation."""
+        missing_fields = [
+            field_name for field_name in REQUIRED_DB_FIELDS if field_name not in db_dict
+        ]
+        if missing_fields:
+            raise ConfigurationError(
+                f"Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
+            )
+
+        return cls(
+            name=db_dict["name"],
+            cluster=db_dict["cluster"],
+            db_system=db_dict["db_system"],
+            db_user=db_dict["db_user"],
+            bridge_port=db_dict["bridge_port"],
+            adminer_port=db_dict["adminer_port"],
+            db_name=db_dict.get("db_name"),
+        )
+
 
 @dataclass
 class ProcessInfo:
@@ -77,37 +123,6 @@ REQUIRED_DB_FIELDS = [
 ]
 
 
-def validate_database_config(db: Dict[str, Any], idx: int) -> None:
-    """Validate a single database configuration."""
-    missing_fields = [
-        field_name for field_name in REQUIRED_DB_FIELDS if field_name not in db
-    ]
-    if missing_fields:
-        raise ConfigurationError(
-            f"Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
-        )
-
-    if db["db_system"] not in ADMINER_DRIVER_MAP:
-        raise ConfigurationError(
-            f"Invalid db_system '{db['db_system']}' for database '{db['name']}'. "
-            f"Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}"
-        )
-
-    for port_field in ["bridge_port", "adminer_port"]:
-        if not isinstance(db[port_field], int) or not (1 <= db[port_field] <= 65535):
-            raise ConfigurationError(
-                f"Invalid {port_field} '{db[port_field]}' for database '{db['name']}'. "
-                f"Port must be an integer between 1 and 65535"
-            )
-
-    hidden_port = get_hidden_port(db["bridge_port"])
-    if hidden_port > 65535:
-        raise ConfigurationError(
-            f"Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}'. "
-            f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= {65535 - HIDDEN_PORT_OFFSET}"
-        )
-
-
 def load_settings() -> List[Database]:
     """Load and validate database settings from settings.json."""
     try:
@@ -131,18 +146,7 @@ def load_settings() -> List[Database]:
 
     databases = []
     for idx, db_dict in enumerate(settings["databases"]):
-        validate_database_config(db_dict, idx)
-        databases.append(
-            Database(
-                name=db_dict["name"],
-                cluster=db_dict["cluster"],
-                db_system=db_dict["db_system"],
-                db_user=db_dict["db_user"],
-                bridge_port=db_dict["bridge_port"],
-                adminer_port=db_dict["adminer_port"],
-                db_name=db_dict.get("db_name"),
-            )
-        )
+        databases.append(Database.from_dict(db_dict, idx))
 
     return databases
 
