@@ -10,6 +10,38 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urlencode
 import yaml
 
+
+# Custom Exceptions
+class OrchestratorError(Exception):
+    """Base exception for orchestrator errors."""
+
+    pass
+
+
+class ConfigurationError(OrchestratorError):
+    """Raised when configuration is invalid."""
+
+    pass
+
+
+class PortAvailabilityError(OrchestratorError):
+    """Raised when required ports are unavailable."""
+
+    pass
+
+
+class ProcessStartupError(OrchestratorError):
+    """Raised when processes fail to start."""
+
+    pass
+
+
+class PreflightCheckError(OrchestratorError):
+    """Raised when preflight checks fail."""
+
+    pass
+
+
 COMPOSE_FILE = "compose.tsh.yml"
 SETTINGS_FILE = "settings.json"
 COMPOSE_CMD = None  # Will be set during pre-flight checks
@@ -39,22 +71,22 @@ def load_settings():
     except FileNotFoundError:
         print(f"❌ {SETTINGS_FILE} not found")
         print(f"Create {SETTINGS_FILE} with your database configurations.")
-        sys.exit(1)
+        raise ConfigurationError(f"{SETTINGS_FILE} not found")
     except json.JSONDecodeError as e:
         print(f"❌ Invalid JSON in {SETTINGS_FILE}: {e}")
-        sys.exit(1)
+        raise ConfigurationError(f"Invalid JSON in {SETTINGS_FILE}: {e}")
 
     if "databases" not in settings:
         print(f"❌ 'databases' key not found in {SETTINGS_FILE}")
-        sys.exit(1)
+        raise ConfigurationError(f"'databases' key not found in {SETTINGS_FILE}")
 
     if not isinstance(settings["databases"], list):
         print(f"❌ 'databases' must be a list in {SETTINGS_FILE}")
-        sys.exit(1)
+        raise ConfigurationError(f"'databases' must be a list in {SETTINGS_FILE}")
 
     if not settings["databases"]:
         print(f"❌ No databases configured in {SETTINGS_FILE}")
-        sys.exit(1)
+        raise ConfigurationError(f"No databases configured in {SETTINGS_FILE}")
 
     # Validate each database configuration
     for idx, db in enumerate(settings["databases"]):
@@ -64,7 +96,9 @@ def load_settings():
             print(
                 f"❌ Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
             )
-            sys.exit(1)
+            raise ConfigurationError(
+                f"Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
+            )
 
         # Validate db_system
         if db["db_system"] not in ADMINER_DRIVER_MAP:
@@ -72,7 +106,9 @@ def load_settings():
                 f"❌ Invalid db_system '{db['db_system']}' for database '{db['name']}'. "
                 f"Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}"
             )
-            sys.exit(1)
+            raise ConfigurationError(
+                f"Invalid db_system '{db['db_system']}' for database '{db['name']}'"
+            )
 
         # Validate port numbers
         for port_field in ["bridge_port", "adminer_port"]:
@@ -83,7 +119,9 @@ def load_settings():
                     f"❌ Invalid {port_field} '{db[port_field]}' for database '{db['name']}'. "
                     f"Port must be an integer between 1 and 65535"
                 )
-                sys.exit(1)
+                raise ConfigurationError(
+                    f"Invalid {port_field} '{db[port_field]}' for database '{db['name']}'"
+                )
 
         # Validate that hidden port (bridge_port + 1000) won't overflow
         hidden_port = get_hidden_port(db["bridge_port"])
@@ -92,7 +130,9 @@ def load_settings():
                 f"❌ Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}'. "
                 f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= 64535"
             )
-            sys.exit(1)
+            raise ConfigurationError(
+                f"Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}': hidden port overflow"
+            )
 
     return settings["databases"]
 
@@ -134,7 +174,7 @@ def check_all_ports(databases):
         for db_name, port_type, port in unavailable_ports:
             print(f"   - {db_name}: {port_type} ({port})")
         print("Please free these ports or update your configuration.")
-        sys.exit(1)
+        raise PortAvailabilityError("Required ports are already in use")
 
     print("✅ All required ports are available.")
 
@@ -361,7 +401,7 @@ async def run_preflight_checks():
 
     if not checks_passed:
         print("❌ Pre-flight checks failed. Please resolve the issues above.")
-        sys.exit(1)
+        raise PreflightCheckError("Pre-flight checks failed")
 
 
 def filter_databases(requested_names, databases):
@@ -391,7 +431,7 @@ def filter_databases(requested_names, databases):
         print("Available databases:")
         for name in available_names:
             print(f"   - {name}")
-        sys.exit(1)
+        raise ConfigurationError(f"Invalid database names: {', '.join(invalid_names)}")
 
     return filtered_dbs
 
@@ -406,6 +446,8 @@ async def cleanup(process_list: List[Dict[str, Any]]) -> None:
     CLEANUP_INITIATED = True
 
     print("🛑 Shutting down containers and tunnels...")
+    if not process_list:
+        print("⚠️  No processes to clean up")
 
     # Terminate all processes first
     terminate_tasks = []
@@ -491,61 +533,7 @@ async def validate_processes_started(process_list: List[Dict[str, Any]]) -> bool
 
 async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
     """Main execution loop."""
-    # 0. Run pre-flight checks
-    await run_preflight_checks()
-
-    # Remove and recreate output directory for clean logs
-    if os.path.exists("output"):
-        shutil.rmtree("output")
-    os.makedirs("output")
-
-    print(
-        f"📦 Selected databases: {', '.join([db['name'] for db in selected_databases])}"
-    )
-
-    # 1. Check if all ports are available
-    print("🔍 Checking port availability...")
-    check_all_ports(selected_databases)
-
-    # 2. Sync the compose file
-    generate_compose_file(selected_databases)
-
-    # 3. Start Container Compose
-    print("🚀 Starting Adminer containers...")
-    compose_log = open("output/compose.log", "a")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *COMPOSE_CMD,
-            "-f",
-            COMPOSE_FILE,
-            "up",
-            "-d",
-            stdout=compose_log,
-            stderr=compose_log,
-        )
-        await proc.communicate()
-    finally:
-        compose_log.close()
-
-    # 4. Start Tunnels and Relays
-    print("🔗 Establishing tunnels and port forwarding...")
     process_list = []
-
-    for db in selected_databases:
-        try:
-            process_list.extend(await start_project_tunnels(db))
-        except Exception as e:
-            print(f"❌ Failed to start tunnels for {db['name']}: {e}")
-            await cleanup(process_list)
-            sys.exit(1)
-
-    # 5. Validate all processes started successfully
-    if not await validate_processes_started(process_list):
-        await cleanup(process_list)
-        sys.exit(1)
-
-    print("✅ Orchestrator active. Adminer instances are running.")
-    print("👀 Monitoring processes for failures...")
 
     shutdown_task = None
 
@@ -559,6 +547,60 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
     loop.add_signal_handler(signal.SIGTERM, signal_handler_sync)
 
     try:
+        # Run pre-flight checks
+        await run_preflight_checks()
+
+        # Remove and recreate output directory for clean logs
+        if os.path.exists("output"):
+            shutil.rmtree("output")
+        os.makedirs("output")
+
+        print(
+            f"📦 Selected databases: {', '.join([db['name'] for db in selected_databases])}"
+        )
+
+        # Check if all ports are available
+        print("🔍 Checking port availability...")
+        check_all_ports(selected_databases)
+
+        # Sync the compose file
+        generate_compose_file(selected_databases)
+
+        # Start Container Compose
+        print("🚀 Starting Adminer containers...")
+        compose_log = open("output/compose.log", "a")
+
+        proc = await asyncio.create_subprocess_exec(
+            *COMPOSE_CMD,
+            "-f",
+            COMPOSE_FILE,
+            "up",
+            "-d",
+            stdout=compose_log,
+            stderr=compose_log,
+        )
+        await proc.communicate()
+        compose_log.close()
+
+        # Start Tunnels and Relays
+        print("🔗 Establishing tunnels and port forwarding...")
+
+        for db in selected_databases:
+            try:
+                process_list.extend(await start_project_tunnels(db))
+            except Exception as e:
+                print(f"❌ Failed to start tunnels for {db['name']}: {e}")
+                raise ProcessStartupError(
+                    f"Failed to start tunnels for {db['name']}: {e}"
+                )
+
+        # 5. Validate all processes started successfully
+        if not await validate_processes_started(process_list):
+            raise ProcessStartupError("Process validation failed")
+
+        print("✅ Orchestrator active. Adminer instances are running.")
+        print("👀 Monitoring processes for failures...")
+
         # Monitor processes - wait for any process to exit
         wait_tasks = {}
         for proc_info in process_list:
@@ -578,7 +620,7 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
         if shutdown_task is not None:
             # Clean shutdown via signal - wait for cleanup to complete
             await shutdown_task
-            sys.exit(0)
+            return  # Clean exit
 
         # A process failed - find which one and handle it
         for completed_task in done:
@@ -588,8 +630,9 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
                 f"❌ {proc_info['type']} process for '{proc_info['db_name']}' has failed (exit code: {exit_code})"
             )
             print(f"   Check log file: {proc_info['log_path']}")
-            await cleanup(process_list)
-            sys.exit(1)
+            raise ProcessStartupError(
+                f"{proc_info['type']} process for '{proc_info['db_name']}' failed with exit code {exit_code}"
+            )
     except Exception:
         # Ensure cleanup happens on unexpected errors
         await cleanup(process_list)
@@ -597,20 +640,34 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
 
 
 if __name__ == "__main__":
-    # Load database settings
-    databases = load_settings()
+    try:
+        # Load database settings
+        databases = load_settings()
 
-    # Parse command-line arguments
-    requested_db_names = []
-    if len(sys.argv) > 1:
-        # Support both space-separated and comma-separated arguments
-        for arg in sys.argv[1:]:
-            # Split by comma and strip whitespace
-            names = [name.strip() for name in arg.split(",") if name.strip()]
-            requested_db_names.extend(names)
+        # Parse command-line arguments
+        requested_db_names = []
+        if len(sys.argv) > 1:
+            # Support both space-separated and comma-separated arguments
+            for arg in sys.argv[1:]:
+                # Split by comma and strip whitespace
+                names = [name.strip() for name in arg.split(",") if name.strip()]
+                requested_db_names.extend(names)
 
-    # Filter and validate databases
-    selected_databases = filter_databases(requested_db_names, databases)
+        # Filter and validate databases
+        selected_databases = filter_databases(requested_db_names, databases)
 
-    # Run orchestrator with selected databases
-    asyncio.run(run_orchestrator(selected_databases))
+        # Run orchestrator with selected databases
+        asyncio.run(run_orchestrator(selected_databases))
+        sys.exit(0)
+    except OrchestratorError:
+        # Expected errors already printed detailed messages
+        sys.exit(1)
+    except KeyboardInterrupt:
+        # User interrupted - already handled by signal handler
+        sys.exit(0)
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
