@@ -84,6 +84,15 @@ def load_settings():
                 )
                 sys.exit(1)
 
+        # Validate that hidden port (bridge_port + 1000) won't overflow
+        hidden_port = get_hidden_port(db["bridge_port"])
+        if hidden_port > 65535:
+            print(
+                f"❌ Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}'. "
+                f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= 64535"
+            )
+            sys.exit(1)
+
     return settings["databases"]
 
 
@@ -180,29 +189,42 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
     tsh_log_path = f"output/{db['name']}_tsh.log"
     socat_log_path = f"output/{db['name']}_socat.log"
 
-    tsh_log = open(tsh_log_path, "w")
-    socat_log = open(socat_log_path, "w")
-    OPEN_FILE_HANDLES.extend([tsh_log, socat_log])
+    tsh_log = None
+    socat_log = None
 
     try:
-        tsh_p = await asyncio.create_subprocess_exec(
-            *tsh_cmd, stdout=tsh_log, stderr=tsh_log
-        )
-    except Exception as e:
-        print(f"❌ Failed to start tsh for {db['name']}: {e}")
-        tsh_log.close()
-        socat_log.close()
-        raise
+        tsh_log = open(tsh_log_path, "w")
+        OPEN_FILE_HANDLES.append(tsh_log)
+        socat_log = open(socat_log_path, "w")
+        OPEN_FILE_HANDLES.append(socat_log)
 
-    try:
-        socat_p = await asyncio.create_subprocess_exec(
-            *socat_cmd, stdout=socat_log, stderr=socat_log
-        )
-    except Exception as e:
-        print(f"❌ Failed to start socat for {db['name']}: {e}")
-        tsh_p.terminate()
-        tsh_log.close()
-        socat_log.close()
+        try:
+            tsh_p = await asyncio.create_subprocess_exec(
+                *tsh_cmd, stdout=tsh_log, stderr=tsh_log
+            )
+        except Exception as e:
+            print(f"❌ Failed to start tsh for {db['name']}: {e}")
+            raise
+
+        try:
+            socat_p = await asyncio.create_subprocess_exec(
+                *socat_cmd, stdout=socat_log, stderr=socat_log
+            )
+        except Exception as e:
+            print(f"❌ Failed to start socat for {db['name']}: {e}")
+            tsh_p.terminate()
+            raise
+
+    except Exception:
+        # Close file handles that were opened
+        if tsh_log:
+            tsh_log.close()
+            if tsh_log in OPEN_FILE_HANDLES:
+                OPEN_FILE_HANDLES.remove(tsh_log)
+        if socat_log:
+            socat_log.close()
+            if socat_log in OPEN_FILE_HANDLES:
+                OPEN_FILE_HANDLES.remove(socat_log)
         raise
 
     adminer_driver = ADMINER_DRIVER_MAP[db["db_system"]]
@@ -518,10 +540,12 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
     print("👀 Monitoring processes for failures...")
 
     shutdown_task = None
+    shutdown_initiated = False
 
     def signal_handler_sync():
-        nonlocal shutdown_task
-        if shutdown_task is None:
+        nonlocal shutdown_task, shutdown_initiated
+        if not shutdown_initiated:
+            shutdown_initiated = True
             shutdown_task = asyncio.create_task(cleanup(process_list))
 
     loop = asyncio.get_event_loop()
@@ -545,7 +569,7 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
             task.cancel()
 
         # Check if it was triggered by shutdown signal
-        if shutdown_task is not None:
+        if shutdown_initiated:
             # Clean shutdown via signal - wait for cleanup to complete
             await shutdown_task
             sys.exit(0)
