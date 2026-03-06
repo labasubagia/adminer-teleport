@@ -4,6 +4,7 @@ import sys
 import socket
 import json
 import os
+import shutil
 import threading
 import time
 from urllib.parse import urlencode
@@ -407,8 +408,10 @@ def run_orchestrator(selected_databases):
     # 0. Run pre-flight checks
     run_preflight_checks()
 
-    # Create output directory for all logs
-    os.makedirs("output", exist_ok=True)
+    # Remove and recreate output directory for clean logs
+    if os.path.exists("output"):
+        shutil.rmtree("output")
+    os.makedirs("output")
 
     print(
         f"📦 Selected databases: {', '.join([db['name'] for db in selected_databases])}"
