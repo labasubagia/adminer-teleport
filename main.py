@@ -5,12 +5,14 @@ import socket
 import json
 import os
 import threading
+import time
 from urllib.parse import urlencode
 import yaml
 
 COMPOSE_FILE = "compose.tsh.yml"
 SETTINGS_FILE = "settings.json"
 COMPOSE_CMD = None  # Will be set during pre-flight checks
+OPEN_FILE_HANDLES = []  # Track file handles for cleanup
 
 ADMINER_DRIVER_MAP = {
     "pgsql": "pgsql",
@@ -33,24 +35,23 @@ def load_settings():
         with open(SETTINGS_FILE, "r") as f:
             settings = json.load(f)
     except FileNotFoundError:
-        print(f"❌ Error: {SETTINGS_FILE} not found")
-        print(f"   Create {SETTINGS_FILE} with your database configurations.")
+        print(f"❌ {SETTINGS_FILE} not found")
+        print(f"Create {SETTINGS_FILE} with your database configurations.")
         sys.exit(1)
     except json.JSONDecodeError as e:
-        print(f"❌ Error: Invalid JSON in {SETTINGS_FILE}")
-        print(f"   {e}")
+        print(f"❌ Invalid JSON in {SETTINGS_FILE}: {e}")
         sys.exit(1)
 
     if "databases" not in settings:
-        print(f"❌ Error: 'databases' key not found in {SETTINGS_FILE}")
+        print(f"❌ 'databases' key not found in {SETTINGS_FILE}")
         sys.exit(1)
 
     if not isinstance(settings["databases"], list):
-        print(f"❌ Error: 'databases' must be a list in {SETTINGS_FILE}")
+        print(f"❌ 'databases' must be a list in {SETTINGS_FILE}")
         sys.exit(1)
 
     if not settings["databases"]:
-        print(f"❌ Error: No databases configured in {SETTINGS_FILE}")
+        print(f"❌ No databases configured in {SETTINGS_FILE}")
         sys.exit(1)
 
     # Validate each database configuration
@@ -58,17 +59,17 @@ def load_settings():
         # Check required fields
         missing_fields = [field for field in REQUIRED_DB_FIELDS if field not in db]
         if missing_fields:
-            print(f"❌ Error: Database at index {idx} is missing required fields:")
-            for field in missing_fields:
-                print(f"   • {field}")
+            print(
+                f"❌ Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
+            )
             sys.exit(1)
 
         # Validate db_system
         if db["db_system"] not in ADMINER_DRIVER_MAP:
             print(
-                f"❌ Error: Invalid db_system '{db['db_system']}' for database '{db['name']}'"
+                f"❌ Invalid db_system '{db['db_system']}' for database '{db['name']}'. "
+                f"Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}"
             )
-            print(f"   Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}")
             sys.exit(1)
 
         # Validate port numbers
@@ -77,9 +78,9 @@ def load_settings():
                 1 <= db[port_field] <= 65535
             ):
                 print(
-                    f"❌ Error: Invalid {port_field} '{db[port_field]}' for database '{db['name']}'"
+                    f"❌ Invalid {port_field} '{db[port_field]}' for database '{db['name']}'. "
+                    f"Port must be an integer between 1 and 65535"
                 )
-                print("   Port must be an integer between 1 and 65535")
                 sys.exit(1)
 
     return settings["databases"]
@@ -118,10 +119,10 @@ def check_all_ports(databases):
             unavailable_ports.append((db["name"], "adminer_port", adminer_port))
 
     if unavailable_ports:
-        print("❌ Error: The following ports are already in use:")
+        print("❌ The following ports are already in use:")
         for db_name, port_type, port in unavailable_ports:
-            print(f"   • {db_name}: {port_type} ({port})")
-        print("\nPlease free these ports or update your configuration.")
+            print(f"   - {db_name}: {port_type} ({port})")
+        print("Please free these ports or update your configuration.")
         sys.exit(1)
 
     print("✅ All required ports are available.")
@@ -148,7 +149,7 @@ def generate_compose_file(databases):
 
     with open(COMPOSE_FILE, "w") as f:
         yaml.dump(compose_dict, f, default_flow_style=False)
-    print(f"✨ {COMPOSE_FILE} synchronized.")
+    print(f"✅ {COMPOSE_FILE} synchronized.")
 
 
 def start_project_tunnels(db):
@@ -175,11 +176,26 @@ def start_project_tunnels(db):
 
     # Create output directory and open log files
     os.makedirs("output", exist_ok=True)
-    tsh_log = open(f"output/{db['name']}_tsh.out", "w")
-    socat_log = open(f"output/{db['name']}_socat.out", "w")
+    tsh_log = open(f"output/{db['name']}_tsh.log", "w")
+    socat_log = open(f"output/{db['name']}_socat.log", "w")
+    OPEN_FILE_HANDLES.extend([tsh_log, socat_log])
 
-    tsh_p = subprocess.Popen(tsh_cmd, stdout=tsh_log, stderr=tsh_log)
-    socat_p = subprocess.Popen(socat_cmd, stdout=socat_log, stderr=socat_log)
+    try:
+        tsh_p = subprocess.Popen(tsh_cmd, stdout=tsh_log, stderr=tsh_log)
+    except Exception as e:
+        print(f"❌ Failed to start tsh for {db['name']}: {e}")
+        tsh_log.close()
+        socat_log.close()
+        raise
+
+    try:
+        socat_p = subprocess.Popen(socat_cmd, stdout=socat_log, stderr=socat_log)
+    except Exception as e:
+        print(f"❌ Failed to start socat for {db['name']}: {e}")
+        tsh_p.terminate()
+        tsh_log.close()
+        socat_log.close()
+        raise
 
     adminer_driver = ADMINER_DRIVER_MAP[db["db_system"]]
     query_map = {
@@ -192,10 +208,10 @@ def start_project_tunnels(db):
     query_params = urlencode(query_map)
     adminer_url = f"http://localhost:{db['adminer_port']}/?{query_params}"
 
-    print(f"  📦 {db['name']}")
-    print(f"   ├─ Tunnel: {db['bridge_port']} → {hidden_port}")
-    print(f"   ├─ Database: {db['db_system'].upper()} (user: {db['db_user']})")
-    print(f"   └─ Adminer: {adminer_url}")
+    print(f"🔗 [{db['name']}]")
+    print(f"   - Tunnel: {db['bridge_port']} → {hidden_port}")
+    print(f"   - Database: {db['db_system'].upper()} (user: {db['db_user']})")
+    print(f"   - Adminer: {adminer_url}")
 
     return [
         {"process": tsh_p, "db_name": db["name"], "type": "tsh"},
@@ -267,7 +283,7 @@ def run_preflight_checks():
     """Verify all prerequisites before starting the orchestrator."""
     global COMPOSE_CMD
 
-    print("🔍 Running pre-flight checks...\n")
+    print("🔍 Running pre-flight checks...")
 
     checks_passed = True
 
@@ -305,10 +321,8 @@ def run_preflight_checks():
             checks_passed = False
 
     if not checks_passed:
-        print("\n❌ Pre-flight checks failed. Please resolve the issues above.")
+        print("❌ Pre-flight checks failed. Please resolve the issues above.")
         sys.exit(1)
-
-    print()
 
 
 def filter_databases(requested_names, databases):
@@ -332,12 +346,12 @@ def filter_databases(requested_names, databases):
             invalid_names.append(name)
 
     if invalid_names:
-        print("❌ Error: The following database(s) do not exist in configuration:")
+        print("❌ The following database(s) do not exist in configuration:")
         for name in invalid_names:
-            print(f"   • {name}")
-        print("\nAvailable databases:")
+            print(f"   - {name}")
+        print("Available databases:")
         for name in available_names:
-            print(f"   • {name}")
+            print(f"   - {name}")
         sys.exit(1)
 
     return filtered_dbs
@@ -350,10 +364,12 @@ def monitor_processes(process_list, shutdown_event):
             process = proc_info["process"]
             poll_result = process.poll()
             if poll_result is not None:  # Process has terminated
+                log_file = f"output/{proc_info['db_name']}_{proc_info['type']}.log"
                 print(
-                    f"\n❌ Error: {proc_info['type']} process for '{proc_info['db_name']}' has failed (exit code: {poll_result})"
+                    f"❌ {proc_info['type']} process for '{proc_info['db_name']}' has failed (exit code: {poll_result})"
                 )
-                print("   Terminating all processes and shutting down...")
+                print(f"   Check log file: {log_file}")
+                print("🛑 Terminating all processes and shutting down...")
 
                 # Signal shutdown
                 shutdown_event.set()
@@ -365,11 +381,20 @@ def monitor_processes(process_list, shutdown_event):
                         p.terminate()
 
                 # Shut down containers
+                compose_log = open("output/compose.log", "a")
                 subprocess.run(
                     [*COMPOSE_CMD, "-f", COMPOSE_FILE, "down"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=compose_log,
+                    stderr=compose_log,
                 )
+                compose_log.close()
+
+                # Close file handles
+                for fh in OPEN_FILE_HANDLES:
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
 
                 sys.exit(1)
 
@@ -382,8 +407,11 @@ def run_orchestrator(selected_databases):
     # 0. Run pre-flight checks
     run_preflight_checks()
 
+    # Create output directory for all logs
+    os.makedirs("output", exist_ok=True)
+
     print(
-        f"📋 Selected databases: {', '.join([db['name'] for db in selected_databases])}\n"
+        f"📦 Selected databases: {', '.join([db['name'] for db in selected_databases])}"
     )
 
     # 1. Check if all ports are available
@@ -393,30 +421,105 @@ def run_orchestrator(selected_databases):
     # 2. Sync the compose file
     generate_compose_file(selected_databases)
 
-    # 3. Start Container Compose (optional: you can run this manually too)
-    print("\n🚀 Starting Adminer containers...")
-    subprocess.run([*COMPOSE_CMD, "-f", COMPOSE_FILE, "up", "-d"])
+    # 3. Start Container Compose
+    print("🚀 Starting Adminer containers...")
+    compose_log = open("output/compose.log", "a")
+    subprocess.run(
+        [*COMPOSE_CMD, "-f", COMPOSE_FILE, "up", "-d"],
+        stdout=compose_log,
+        stderr=compose_log,
+    )
+    compose_log.close()
 
     # 4. Start Tunnels and Relays
-    print("\n🚀 Establishing tunnels and port forwarding...")
+    print("🔗 Establishing tunnels and port forwarding...")
     process_list = []
     for db in selected_databases:
-        process_list.extend(start_project_tunnels(db))
+        try:
+            process_list.extend(start_project_tunnels(db))
+        except Exception as e:
+            print(f"❌ Failed to start tunnels for {db['name']}: {e}")
+            # Clean up any processes that were started
+            for proc_info in process_list:
+                proc_info["process"].terminate()
+            compose_log = open("output/compose.log", "a")
+            subprocess.run(
+                [*COMPOSE_CMD, "-f", COMPOSE_FILE, "down"],
+                stdout=compose_log,
+                stderr=compose_log,
+            )
+            compose_log.close()
+            sys.exit(1)
 
-    print("\n✅ Orchestrator active. Adminer instances are running.")
-    print("   Monitoring processes for failures...\n")
+    # 5. Validate all processes started successfully
+    print("⏳ Validating process startup...")
+    time.sleep(2)  # Give processes time to fail if there's an issue
+    failed_processes = []
+    for proc_info in process_list:
+        if proc_info["process"].poll() is not None:
+            failed_processes.append(proc_info)
+
+    if failed_processes:
+        print("❌ The following processes failed to start:")
+        for proc_info in failed_processes:
+            log_file = f"output/{proc_info['db_name']}_{proc_info['type']}.log"
+            print(
+                f"   • {proc_info['type']} for {proc_info['db_name']} - check {log_file}"
+            )
+        # Clean up
+        for proc_info in process_list:
+            if proc_info["process"].poll() is None:
+                proc_info["process"].terminate()
+        compose_log = open("output/compose.log", "a")
+        subprocess.run(
+            [*COMPOSE_CMD, "-f", COMPOSE_FILE, "down"],
+            stdout=compose_log,
+            stderr=compose_log,
+        )
+        compose_log.close()
+        for fh in OPEN_FILE_HANDLES:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        sys.exit(1)
+
+    print("✅ Orchestrator active. Adminer instances are running.")
+    print("👀 Monitoring processes for failures...")
 
     # Event for coordinating shutdown
     shutdown_event = threading.Event()
 
     def signal_handler(sig, frame):
-        print("\nShutting down containers and tunnels...")
+        print("\n🛑 Shutting down containers and tunnels...")
         shutdown_event.set()
-        subprocess.run([*COMPOSE_CMD, "-f", COMPOSE_FILE, "down"])
+        # Redirect compose down output to log file
+        compose_log = open("output/compose.log", "a")
+        subprocess.run(
+            [*COMPOSE_CMD, "-f", COMPOSE_FILE, "down"],
+            stdout=compose_log,
+            stderr=compose_log,
+        )
+        compose_log.close()
         for proc_info in process_list:
             p = proc_info["process"]
             if p.poll() is None:
                 p.terminate()
+        # Wait for processes to terminate gracefully
+        time.sleep(1)
+        for proc_info in process_list:
+            p = proc_info["process"]
+            if p.poll() is None:
+                print(
+                    f"⚠️  Force killing {proc_info['type']} for {proc_info['db_name']}"
+                )
+                p.kill()
+        # Close file handles
+        for fh in OPEN_FILE_HANDLES:
+            try:
+                fh.close()
+            except Exception:
+                pass
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
