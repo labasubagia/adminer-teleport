@@ -68,24 +68,24 @@ Each database uses three ports:
 ### Run All Databases
 
 ```bash
-python tsh_proxy_db.py
+python main.py
 ```
 
 ### Run Specific Databases
 
 Space-separated:
 ```bash
-python tsh_proxy_db.py db_staging_1 kns_utils_staging
+python main.py db_staging_1 kns_utils_staging
 ```
 
 Comma-separated:
 ```bash
-python tsh_proxy_db.py db_staging_1,kns_utils_staging
+python main.py db_staging_1,kns_utils_staging
 ```
 
 Single database:
 ```bash
-python tsh_proxy_db.py kns_utils_staging
+python main.py kns_utils_staging
 ```
 
 ### Access Adminer
@@ -249,7 +249,7 @@ Add Adminer plugins to `plugins-enabled/` directory. They're automatically mount
 
 ```
 .
-├── tsh_proxy_db.py              # Main orchestrator script
+├── main.py                      # Main orchestrator script
 ├── settings.json                # Database configurations (git-ignored)
 ├── settings.example.json        # Configuration template
 ├── compose.tsh.yml              # Auto-generated compose file (git-ignored)
