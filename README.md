@@ -6,7 +6,8 @@ Orchestrator for running Adminer instances with Teleport database proxy tunnels.
 
 - 🔒 Secure database access through Teleport proxy
 - 🐳 Containerized Adminer instances (Podman/Docker)
-- 🔌 Automatic port forwarding and tunnel management
+- � Automatic container runtime detection (supports Docker Compose v2, Podman Compose, Docker Compose v1)
+- �🔌 Automatic port forwarding and tunnel management
 - ✅ Port availability checking before startup
 - 🎯 Selective database launching
 - 🧹 Clean shutdown handling (Ctrl+C)
@@ -15,7 +16,10 @@ Orchestrator for running Adminer instances with Teleport database proxy tunnels.
 
 - Python 3.6+
 - [Teleport](https://goteleport.com/) (`tsh` CLI tool)
-- [Podman](https://podman.io/) with `podman-compose` (or Docker with `docker-compose`)
+- Container runtime with compose: **one of the following:**
+  - [Docker](https://www.docker.com/) with `docker compose` (v2 plugin)
+  - [Podman](https://podman.io/) with `podman-compose`
+  - `docker-compose` (v1 standalone)
 - `socat` for port forwarding
 - PyYAML package: `pip install pyyaml`
 
@@ -83,10 +87,10 @@ Click the Adminer URL or navigate to it in your browser.
 
 ## How It Works
 
-1. **Pre-flight Checks**: Verifies `tsh` and `socat` are installed, and Teleport is logged in
+1. **Pre-flight Checks**: Verifies container runtime, `tsh`, `socat` are installed, and Teleport is logged in
 2. **Port Check**: Validates all required ports are available
 3. **Compose Generation**: Creates `compose.tsh.yml` with Adminer container configs
-4. **Container Startup**: Launches Adminer containers via podman-compose
+4. **Container Startup**: Launches Adminer containers via detected compose tool
 5. **Tunnel Creation**: For each database:
    - Starts `tsh proxy db --tunnel` on hidden_port
    - Starts `socat` relay forwarding bridge_port → hidden_port
@@ -135,6 +139,19 @@ brew install socat
 tsh login --proxy=your-proxy.teleport.sh
 ```
 
+**No container compose tool found:**
+```bash
+# Install Docker (with compose v2)
+# See: https://docs.docker.com/get-docker/
+
+# OR install Podman with podman-compose
+sudo apt install podman podman-compose  # Ubuntu/Debian
+brew install podman podman-compose      # macOS
+
+# OR install docker-compose v1
+pip install docker-compose
+```
+
 ### Port Already in Use
 
 If you see port availability errors:
@@ -159,14 +176,28 @@ Check the `DATABASES` list in the script for available database names.
 
 ### Container Issues
 
-Check container status:
+Check container status (replace with your compose command):
 ```bash
+# Docker Compose v2
+docker compose -f compose.tsh.yml ps
+
+# Podman Compose
 podman-compose -f compose.tsh.yml ps
+
+# Docker Compose v1
+docker-compose -f compose.tsh.yml ps
 ```
 
 View logs:
 ```bash
+# Docker Compose v2
+docker compose -f compose.tsh.yml logs
+
+# Podman Compose
 podman-compose -f compose.tsh.yml logs
+
+# Docker Compose v1
+docker-compose -f compose.tsh.yml logs
 ```
 
 ## Customization

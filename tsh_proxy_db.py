@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import yaml
 
 COMPOSE_FILE = "compose.tsh.yml"
+COMPOSE_CMD = None  # Will be set during pre-flight checks
 
 ADMINER_DRIVER_MAP = {
     "pgsql": "pgsql",
@@ -156,6 +157,36 @@ def check_command_exists(command):
         return False
 
 
+def detect_compose_command():
+    """Detect which container compose command is available."""
+    # Check for docker compose (v2 plugin-style)
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=3,
+        )
+        if result.returncode == 0:
+            return ["docker", "compose"]
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ):
+        pass
+
+    # Check for podman-compose
+    if check_command_exists("podman-compose"):
+        return ["podman-compose"]
+
+    # Check for docker-compose (v1 standalone)
+    if check_command_exists("docker-compose"):
+        return ["docker-compose"]
+
+    return None
+
+
 def check_tsh_logged_in():
     """Check if user is logged in to Teleport."""
     try:
@@ -174,11 +205,21 @@ def check_tsh_logged_in():
 
 def run_preflight_checks():
     """Verify all prerequisites before starting the orchestrator."""
+    global COMPOSE_CMD
+
     print("🔍 Running pre-flight checks...\n")
 
     checks_passed = True
 
-    # Check tsh installation
+    # Check container compose availability
+    COMPOSE_CMD = detect_compose_command()
+    if COMPOSE_CMD:
+        compose_name = " ".join(COMPOSE_CMD)
+        print(f"✅ Container runtime found: {compose_name}")
+    else:
+        print("❌ No container compose tool found")
+        print("   Install one of: docker compose, podman-compose, or docker-compose")
+        checks_passed = False
     if check_command_exists("tsh"):
         print("✅ tsh is installed")
     else:
@@ -258,9 +299,9 @@ def run_orchestrator(selected_databases):
     # 2. Sync the compose file
     generate_compose_file(selected_databases)
 
-    # 3. Start Podman Compose (optional: you can run this manually too)
+    # 3. Start Container Compose (optional: you can run this manually too)
     print("\n🚀 Starting Adminer containers...")
-    subprocess.run(["podman-compose", "-f", COMPOSE_FILE, "up", "-d"])
+    subprocess.run([*COMPOSE_CMD, "-f", COMPOSE_FILE, "up", "-d"])
 
     # 4. Start Tunnels and Relays
     print("\n🚀 Establishing tunnels and port forwarding...")
@@ -272,7 +313,7 @@ def run_orchestrator(selected_databases):
 
     def signal_handler(sig, frame):
         print("\nShutting down containers and tunnels...")
-        subprocess.run(["podman-compose", "-f", COMPOSE_FILE, "down"])
+        subprocess.run([*COMPOSE_CMD, "-f", COMPOSE_FILE, "down"])
         for p in all_processes:
             p.terminate()
         sys.exit(0)
