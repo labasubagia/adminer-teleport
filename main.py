@@ -590,9 +590,10 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
             print(f"   Check log file: {proc_info['log_path']}")
             await cleanup(process_list)
             sys.exit(1)
-    finally:
-        # Ensure cleanup happens even on unexpected errors
+    except Exception:
+        # Ensure cleanup happens on unexpected errors
         await cleanup(process_list)
+        raise
 
 
 if __name__ == "__main__":
