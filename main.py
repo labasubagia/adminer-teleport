@@ -15,31 +15,21 @@ import yaml
 class OrchestratorError(Exception):
     """Base exception for orchestrator errors."""
 
-    pass
-
 
 class ConfigurationError(OrchestratorError):
     """Raised when configuration is invalid."""
-
-    pass
 
 
 class PortAvailabilityError(OrchestratorError):
     """Raised when required ports are unavailable."""
 
-    pass
-
 
 class ProcessStartupError(OrchestratorError):
     """Raised when processes fail to start."""
 
-    pass
-
 
 class PreflightCheckError(OrchestratorError):
     """Raised when preflight checks fail."""
-
-    pass
 
 
 COMPOSE_FILE = "compose.tsh.yml"
@@ -59,6 +49,35 @@ REQUIRED_DB_FIELDS = [
     "bridge_port",
     "adminer_port",
 ]
+
+
+def validate_database_config(db: Dict[str, Any], idx: int) -> None:
+    """Validate a single database configuration."""
+    missing_fields = [field for field in REQUIRED_DB_FIELDS if field not in db]
+    if missing_fields:
+        raise ConfigurationError(
+            f"Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
+        )
+
+    if db["db_system"] not in ADMINER_DRIVER_MAP:
+        raise ConfigurationError(
+            f"Invalid db_system '{db['db_system']}' for database '{db['name']}'. "
+            f"Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}"
+        )
+
+    for port_field in ["bridge_port", "adminer_port"]:
+        if not isinstance(db[port_field], int) or not (1 <= db[port_field] <= 65535):
+            raise ConfigurationError(
+                f"Invalid {port_field} '{db[port_field]}' for database '{db['name']}'. "
+                f"Port must be an integer between 1 and 65535"
+            )
+
+    hidden_port = get_hidden_port(db["bridge_port"])
+    if hidden_port > 65535:
+        raise ConfigurationError(
+            f"Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}'. "
+            f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= 64535"
+        )
 
 
 def load_settings():
@@ -82,39 +101,8 @@ def load_settings():
     if not settings["databases"]:
         raise ConfigurationError(f"No databases configured in {SETTINGS_FILE}")
 
-    # Validate each database configuration
     for idx, db in enumerate(settings["databases"]):
-        # Check required fields
-        missing_fields = [field for field in REQUIRED_DB_FIELDS if field not in db]
-        if missing_fields:
-            raise ConfigurationError(
-                f"Database at index {idx} is missing required fields: {', '.join(missing_fields)}"
-            )
-
-        # Validate db_system
-        if db["db_system"] not in ADMINER_DRIVER_MAP:
-            raise ConfigurationError(
-                f"Invalid db_system '{db['db_system']}' for database '{db['name']}'. "
-                f"Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}"
-            )
-
-        # Validate port numbers
-        for port_field in ["bridge_port", "adminer_port"]:
-            if not isinstance(db[port_field], int) or not (
-                1 <= db[port_field] <= 65535
-            ):
-                raise ConfigurationError(
-                    f"Invalid {port_field} '{db[port_field]}' for database '{db['name']}'. "
-                    f"Port must be an integer between 1 and 65535"
-                )
-
-        # Validate that hidden port (bridge_port + 1000) won't overflow
-        hidden_port = get_hidden_port(db["bridge_port"])
-        if hidden_port > 65535:
-            raise ConfigurationError(
-                f"Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}'. "
-                f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= 64535"
-            )
+        validate_database_config(db, idx)
 
     return settings["databases"]
 
@@ -139,23 +127,19 @@ def check_all_ports(databases):
     unavailable_ports = []
 
     for db in databases:
-        bridge_port = db["bridge_port"]
-        hidden_port = get_hidden_port(bridge_port)
-        adminer_port = db["adminer_port"]
-
-        if not is_port_available(bridge_port):
-            unavailable_ports.append((db["name"], "bridge_port", bridge_port))
-        if not is_port_available(hidden_port):
-            unavailable_ports.append((db["name"], "hidden_port", hidden_port))
-        if not is_port_available(adminer_port):
-            unavailable_ports.append((db["name"], "adminer_port", adminer_port))
+        ports_to_check = [
+            ("bridge_port", db["bridge_port"]),
+            ("hidden_port", get_hidden_port(db["bridge_port"])),
+            ("adminer_port", db["adminer_port"]),
+        ]
+        for port_type, port in ports_to_check:
+            if not is_port_available(port):
+                unavailable_ports.append((db["name"], port_type, port))
 
     if unavailable_ports:
         port_list = "\n".join(
-            [
-                f"   - {db_name}: {port_type} ({port})"
-                for db_name, port_type, port in unavailable_ports
-            ]
+            f"   - {db_name}: {port_type} ({port})"
+            for db_name, port_type, port in unavailable_ports
         )
         raise PortAvailabilityError(
             f"The following ports are already in use:\n{port_list}\nPlease free these ports or update your configuration."
@@ -192,6 +176,7 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Starts the tsh tunnel and the socat relay."""
     hidden_port = get_hidden_port(db["bridge_port"])
 
+    # Build tsh command
     tsh_cmd = [
         "tsh",
         "proxy",
@@ -204,6 +189,7 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
         tsh_cmd.append(f"--db-name={db['db_name']}")
     tsh_cmd.append(db["cluster"])
 
+    # Build socat command
     socat_cmd = [
         "socat",
         f"TCP-LISTEN:{db['bridge_port']},fork,reuseaddr",
@@ -312,7 +298,6 @@ def check_tsh_logged_in():
             text=True,
             timeout=5,
         )
-        # tsh status returns 0 if logged in, non-zero otherwise
         return result.returncode == 0
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
@@ -371,7 +356,6 @@ def filter_databases(requested_names, databases):
 
     db_map = {db["name"]: db for db in databases}
 
-    # Separate valid and invalid names using list comprehensions
     filtered_dbs = [db_map[name] for name in requested_names if name in db_map]
     invalid_names = [name for name in requested_names if name not in db_map]
 
@@ -577,14 +561,13 @@ if __name__ == "__main__":
         # Load database settings
         databases = load_settings()
 
-        # Parse command-line arguments
-        requested_db_names = []
-        if len(sys.argv) > 1:
-            # Support both space-separated and comma-separated arguments
-            for arg in sys.argv[1:]:
-                # Split by comma and strip whitespace
-                names = [name.strip() for name in arg.split(",") if name.strip()]
-                requested_db_names.extend(names)
+        # Parse command-line arguments (space-separated or comma-separated)
+        requested_db_names = [
+            name.strip()
+            for arg in sys.argv[1:]
+            for name in arg.split(",")
+            if name.strip()
+        ]
 
         # Filter and validate databases
         selected_databases = filter_databases(requested_db_names, databases)
