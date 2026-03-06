@@ -142,14 +142,50 @@ def start_project_tunnels(db):
     return [tsh_p, socat_p]
 
 
-def run_orchestrator():
+def filter_databases(requested_names):
+    """Filter DATABASES based on requested names and validate they exist."""
+    if not requested_names:
+        # No arguments provided, return all databases
+        return DATABASES
+
+    # Create a map of database names to configs
+    db_map = {db["name"]: db for db in DATABASES}
+    available_names = list(db_map.keys())
+
+    # Validate and filter
+    filtered_dbs = []
+    invalid_names = []
+
+    for name in requested_names:
+        if name in db_map:
+            filtered_dbs.append(db_map[name])
+        else:
+            invalid_names.append(name)
+
+    if invalid_names:
+        print("❌ Error: The following database(s) do not exist in configuration:")
+        for name in invalid_names:
+            print(f"   • {name}")
+        print("\nAvailable databases:")
+        for name in available_names:
+            print(f"   • {name}")
+        sys.exit(1)
+
+    return filtered_dbs
+
+
+def run_orchestrator(selected_databases):
     """Main execution loop."""
+    print(
+        f"📋 Selected databases: {', '.join([db['name'] for db in selected_databases])}\n"
+    )
+
     # 1. Check if all ports are available
     print("🔍 Checking port availability...")
-    check_all_ports(DATABASES)
+    check_all_ports(selected_databases)
 
     # 2. Sync the compose file
-    generate_compose_file(DATABASES)
+    generate_compose_file(selected_databases)
 
     # 3. Start Podman Compose (optional: you can run this manually too)
     print("\n🚀 Starting Adminer containers...")
@@ -158,7 +194,7 @@ def run_orchestrator():
     # 4. Start Tunnels and Relays
     print("\n🚀 Establishing tunnels and port forwarding...")
     all_processes = []
-    for db in DATABASES:
+    for db in selected_databases:
         all_processes.extend(start_project_tunnels(db))
 
     print("\n✅ Orchestrator active. Adminer instances are running.")
@@ -177,4 +213,17 @@ def run_orchestrator():
 
 
 if __name__ == "__main__":
-    run_orchestrator()
+    # Parse command-line arguments
+    requested_db_names = []
+    if len(sys.argv) > 1:
+        # Support both space-separated and comma-separated arguments
+        for arg in sys.argv[1:]:
+            # Split by comma and strip whitespace
+            names = [name.strip() for name in arg.split(",") if name.strip()]
+            requested_db_names.extend(names)
+
+    # Filter and validate databases
+    selected_databases = filter_databases(requested_db_names)
+
+    # Run orchestrator with selected databases
+    run_orchestrator(selected_databases)
