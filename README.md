@@ -6,8 +6,8 @@ Orchestrator for running Adminer instances with Teleport database proxy tunnels.
 
 - 🔒 Secure database access through Teleport proxy
 - 🐳 Containerized Adminer instances (Podman/Docker)
-- � Automatic container runtime detection (supports Docker Compose v2, Podman Compose, Docker Compose v1)
-- �🔌 Automatic port forwarding and tunnel management
+- 🔍 Automatic container runtime detection (supports Docker Compose v2, Podman Compose, Docker Compose v1)
+- 🔌 Automatic port forwarding and tunnel management
 - ✅ Port availability checking before startup
 - 🎯 Selective database launching
 - 🧹 Clean shutdown handling (Ctrl+C)
@@ -37,13 +37,21 @@ Then edit `settings.json` to configure your databases:
 {
   "databases": [
     {
-      "name": "kns_utils_staging",           // Unique identifier
-      "cluster": "kns-utils-staging-huawei", // Teleport database cluster name
-      "db_system": "pgsql",                  // Database type: "pgsql" or "mysql"
-      "db_user": "teleporteditor",           // Database user
-      "db_name": "my_database",              // Database name (optional, but required by some newer Teleport versions, especially for PostgreSQL)
-      "bridge_port": 5433,                   // Local port for database connection
-      "adminer_port": 8081                   // Web interface port
+      "name": "example_database",      // Unique identifier
+      "cluster": "your-cluster-name",  // Teleport database cluster name
+      "db_system": "pgsql",            // Database type: "pgsql" or "mysql"
+      "db_user": "your-username",      // Database user
+      "db_name": "my_database",        // Database name (optional, but required by some newer Teleport versions, especially for PostgreSQL)
+      "bridge_port": 5433,             // Local port for database connection
+      "adminer_port": 8081             // Web interface port
+    },
+    {
+      "name": "another_database",
+      "cluster": "another-cluster-name",
+      "db_system": "mysql",
+      "db_user": "your-username",
+      "bridge_port": 3307,
+      "adminer_port": 8082
     }
   ]
 }
@@ -79,30 +87,32 @@ python main.py
 
 Space-separated:
 ```bash
-python main.py db_staging_1 kns_utils_staging
+python main.py example_database another_database
 ```
 
 Comma-separated:
 ```bash
-python main.py db_staging_1,kns_utils_staging
+python main.py example_database,another_database
 ```
 
 Single database:
 ```bash
-python main.py kns_utils_staging
+python main.py example_database
 ```
 
 ### Access Adminer
 
 Once running, access the web interface at the URLs displayed in the output:
 ```
-📦 kns_utils_staging
+📦 example_database
  ├─ Tunnel: 5433 → 6433
- ├─ Database: PGSQL (user: teleporteditor)
- └─ Adminer: http://localhost:8081/?pgsql=host.containers.internal:5433&username=teleporteditor
+ ├─ Database: PGSQL (user: your-username)
+ └─ Adminer: http://localhost:8081/?pgsql=host.containers.internal:5433&username=your-username
 ```
 
-Click the Adminer URL or navigate to it in your browser.
+Click the Adminer URL or navigate to it in your browser. 
+
+**Login**: The passwordless plugin is enabled by default. Use password `a` to login (can be changed in `plugins-enabled/login-password-less.php`).
 
 ## How It Works
 
@@ -176,7 +186,7 @@ pip install docker-compose
 If you see port availability errors:
 ```bash
 ❌ Error: The following ports are already in use:
-   • kns_utils_staging: bridge_port (5433)
+   • example_database: bridge_port (5433)
 ```
 
 **Solutions:**
@@ -249,6 +259,13 @@ Change the theme in `generate_compose_file()`:
 ### Plugins
 
 Add Adminer plugins to `plugins-enabled/` directory. They're automatically mounted into containers.
+
+#### Passwordless Login
+
+The included `login-password-less.php` plugin enables login using a fixed password instead of the actual database password:
+- **Default password**: `a`
+- To change: Edit `plugins-enabled/login-password-less.php` and update the password in `password_hash("a", ...)` to your preferred value
+- This is useful for quick access through Teleport proxy where authentication is already handled
 
 ## Logs
 
