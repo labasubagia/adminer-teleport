@@ -1,10 +1,10 @@
 import subprocess
-import time
 import signal
 import sys
 import socket
 import json
 import os
+import threading
 from urllib.parse import urlencode
 import yaml
 
@@ -197,7 +197,10 @@ def start_project_tunnels(db):
     print(f"   ├─ Database: {db['db_system'].upper()} (user: {db['db_user']})")
     print(f"   └─ Adminer: {adminer_url}")
 
-    return [tsh_p, socat_p]
+    return [
+        {"process": tsh_p, "db_name": db["name"], "type": "tsh"},
+        {"process": socat_p, "db_name": db["name"], "type": "socat"},
+    ]
 
 
 def check_command_exists(command):
@@ -340,6 +343,40 @@ def filter_databases(requested_names, databases):
     return filtered_dbs
 
 
+def monitor_processes(process_list, shutdown_event):
+    """Monitor all processes and terminate everything if any process fails."""
+    while not shutdown_event.is_set():
+        for proc_info in process_list:
+            process = proc_info["process"]
+            poll_result = process.poll()
+            if poll_result is not None:  # Process has terminated
+                print(
+                    f"\n❌ Error: {proc_info['type']} process for '{proc_info['db_name']}' has failed (exit code: {poll_result})"
+                )
+                print("   Terminating all processes and shutting down...")
+
+                # Signal shutdown
+                shutdown_event.set()
+
+                # Terminate all remaining processes
+                for p_info in process_list:
+                    p = p_info["process"]
+                    if p.poll() is None:  # Only terminate if still running
+                        p.terminate()
+
+                # Shut down containers
+                subprocess.run(
+                    [*COMPOSE_CMD, "-f", COMPOSE_FILE, "down"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+                sys.exit(1)
+
+        # Check every 2 seconds
+        shutdown_event.wait(2)
+
+
 def run_orchestrator(selected_databases):
     """Main execution loop."""
     # 0. Run pre-flight checks
@@ -362,23 +399,38 @@ def run_orchestrator(selected_databases):
 
     # 4. Start Tunnels and Relays
     print("\n🚀 Establishing tunnels and port forwarding...")
-    all_processes = []
+    process_list = []
     for db in selected_databases:
-        all_processes.extend(start_project_tunnels(db))
+        process_list.extend(start_project_tunnels(db))
 
     print("\n✅ Orchestrator active. Adminer instances are running.")
+    print("   Monitoring processes for failures...\n")
+
+    # Event for coordinating shutdown
+    shutdown_event = threading.Event()
 
     def signal_handler(sig, frame):
         print("\nShutting down containers and tunnels...")
+        shutdown_event.set()
         subprocess.run([*COMPOSE_CMD, "-f", COMPOSE_FILE, "down"])
-        for p in all_processes:
-            p.terminate()
+        for proc_info in process_list:
+            p = proc_info["process"]
+            if p.poll() is None:
+                p.terminate()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    while True:
-        time.sleep(1)
+    # Start monitoring thread
+    monitor_thread = threading.Thread(
+        target=monitor_processes,
+        args=(process_list, shutdown_event),
+        daemon=True,
+    )
+    monitor_thread.start()
+
+    # Wait for shutdown signal
+    shutdown_event.wait()
 
 
 if __name__ == "__main__":
