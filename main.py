@@ -103,8 +103,13 @@ class ProcessInfo:
     log_file: TextIO
 
 
-COMPOSE_FILE = "compose.tsh.yml"
-SETTINGS_FILE = "settings.json"
+COMPOSE_FILE = "compose.yml"
+SETTINGS_PATH = os.getenv(
+    "ADMINER_TELEPORT_SETTING_PATH", os.path.join(os.getcwd(), "settings.json")
+)
+OUTPUT_DIR = os.getenv(
+    "ADMINER_TELEPORT_OUTPUT_DIR", os.path.join(os.getcwd(), "output")
+)
 COMPOSE_CMD = None  # Will be set during pre-flight checks
 HIDDEN_PORT_OFFSET = 1000
 
@@ -126,23 +131,23 @@ REQUIRED_DB_FIELDS = [
 def load_settings() -> List[Database]:
     """Load and validate database settings from settings.json."""
     try:
-        with open(SETTINGS_FILE, "r") as f:
+        with open(SETTINGS_PATH, "r") as f:
             settings = json.load(f)
     except FileNotFoundError:
         raise ConfigurationError(
-            f"{SETTINGS_FILE} not found. Create {SETTINGS_FILE} with your database configurations."
+            f"{SETTINGS_PATH} not found. Create {SETTINGS_PATH} with your database configurations."
         )
     except json.JSONDecodeError as e:
-        raise ConfigurationError(f"Invalid JSON in {SETTINGS_FILE}: {e}")
+        raise ConfigurationError(f"Invalid JSON in {SETTINGS_PATH}: {e}")
 
     if "databases" not in settings:
-        raise ConfigurationError(f"'databases' key not found in {SETTINGS_FILE}")
+        raise ConfigurationError(f"'databases' key not found in {SETTINGS_PATH}")
 
     if not isinstance(settings["databases"], list):
-        raise ConfigurationError(f"'databases' must be a list in {SETTINGS_FILE}")
+        raise ConfigurationError(f"'databases' must be a list in {SETTINGS_PATH}")
 
     if not settings["databases"]:
-        raise ConfigurationError(f"No databases configured in {SETTINGS_FILE}")
+        raise ConfigurationError(f"No databases configured in {SETTINGS_PATH}")
 
     databases = []
     for idx, db_dict in enumerate(settings["databases"]):
@@ -264,10 +269,10 @@ async def start_project_tunnels(db: Database) -> List[ProcessInfo]:
 
     # Create output directory and open log files
     # Note: Files remain open and are closed later in cleanup()
-    os.makedirs("output", exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    tsh_log_path = f"output/{db.name}_tsh.log"
-    socat_log_path = f"output/{db.name}_socat.log"
+    tsh_log_path = os.path.join(OUTPUT_DIR, f"{db.name}_tsh.log")
+    socat_log_path = os.path.join(OUTPUT_DIR, f"{db.name}_socat.log")
 
     tsh_log = open(tsh_log_path, "w")
     socat_log = open(socat_log_path, "w")
@@ -481,7 +486,8 @@ async def cleanup(process_list: List[ProcessInfo]) -> None:
 
     # Shut down containers
     if COMPOSE_CMD:
-        with open("output/compose.log", "a") as compose_log:
+        compose_log_path = os.path.join(OUTPUT_DIR, "compose.log")
+        with open(compose_log_path, "a") as compose_log:
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *COMPOSE_CMD,
@@ -539,9 +545,9 @@ async def run_orchestrator(selected_databases: List[Database]) -> None:
         await run_preflight_checks()
 
         # Remove and recreate output directory for clean logs
-        if os.path.exists("output"):
-            shutil.rmtree("output")
-        os.makedirs("output")
+        if os.path.exists(OUTPUT_DIR):
+            shutil.rmtree(OUTPUT_DIR)
+        os.makedirs(OUTPUT_DIR)
 
         print(
             f"📦 Selected databases: {', '.join([db.name for db in selected_databases])}"
@@ -556,7 +562,8 @@ async def run_orchestrator(selected_databases: List[Database]) -> None:
 
         # Start Container Compose
         print("🚀 Starting Adminer containers...")
-        with open("output/compose.log", "a") as compose_log:
+        compose_log_path = os.path.join(OUTPUT_DIR, "compose.log")
+        with open(compose_log_path, "w") as compose_log:
             proc = await asyncio.create_subprocess_exec(
                 *COMPOSE_CMD,
                 "-f",
