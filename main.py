@@ -35,6 +35,7 @@ class PreflightCheckError(OrchestratorError):
 COMPOSE_FILE = "compose.tsh.yml"
 SETTINGS_FILE = "settings.json"
 COMPOSE_CMD = None  # Will be set during pre-flight checks
+HIDDEN_PORT_OFFSET = 1000
 
 ADMINER_DRIVER_MAP = {
     "pgsql": "pgsql",
@@ -76,7 +77,7 @@ def validate_database_config(db: Dict[str, Any], idx: int) -> None:
     if hidden_port > 65535:
         raise ConfigurationError(
             f"Invalid bridge_port '{db['bridge_port']}' for database '{db['name']}'. "
-            f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= 64535"
+            f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= {65535 - HIDDEN_PORT_OFFSET}"
         )
 
 
@@ -108,7 +109,29 @@ def load_settings():
 
 
 def get_hidden_port(bridge_port: int) -> int:
-    return bridge_port + 1000
+    return bridge_port + HIDDEN_PORT_OFFSET
+
+
+def build_adminer_url(db: Dict[str, Any]) -> str:
+    """Build the Adminer URL with query parameters for the database."""
+    adminer_driver = ADMINER_DRIVER_MAP[db["db_system"]]
+    query_map = {
+        adminer_driver: f"host.containers.internal:{db['bridge_port']}",
+        "username": db["db_user"],
+    }
+    if "db_name" in db and db["db_name"]:
+        query_map["db"] = db["db_name"]
+
+    query_params = urlencode(query_map)
+    return f"http://localhost:{db['adminer_port']}/?{query_params}"
+
+
+def print_database_info(db: Dict[str, Any], hidden_port: int, adminer_url: str) -> None:
+    """Print connection information for a database."""
+    print(f"🔗 [{db['name']}]")
+    print(f"   - Tunnel: {db['bridge_port']} → {hidden_port}")
+    print(f"   - Database: {db['db_system'].upper()} (user: {db['db_user']})")
+    print(f"   - Adminer: {adminer_url}")
 
 
 def is_port_available(port, host="127.0.0.1"):
@@ -221,21 +244,8 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
         socat_log.close()
         raise
 
-    adminer_driver = ADMINER_DRIVER_MAP[db["db_system"]]
-    query_map = {
-        adminer_driver: f"host.containers.internal:{db['bridge_port']}",
-        "username": db["db_user"],
-    }
-    if "db_name" in db and db["db_name"]:
-        query_map["db"] = db["db_name"]
-
-    query_params = urlencode(query_map)
-    adminer_url = f"http://localhost:{db['adminer_port']}/?{query_params}"
-
-    print(f"🔗 [{db['name']}]")
-    print(f"   - Tunnel: {db['bridge_port']} → {hidden_port}")
-    print(f"   - Database: {db['db_system'].upper()} (user: {db['db_user']})")
-    print(f"   - Adminer: {adminer_url}")
+    adminer_url = build_adminer_url(db)
+    print_database_info(db, hidden_port, adminer_url)
 
     return [
         {
@@ -258,6 +268,17 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
 def check_command_exists(command):
     """Check if a command is available in the system."""
     return shutil.which(command) is not None
+
+
+def check_command_available(command: str, not_found_message: str) -> bool:
+    """Check if a command is available and print status."""
+    if check_command_exists(command):
+        print(f"✅ {command} is installed")
+        return True
+    else:
+        print(f"❌ {command} is not installed")
+        print(f"   {not_found_message}")
+        return False
 
 
 async def detect_compose_command() -> Optional[List[str]]:
@@ -311,7 +332,6 @@ async def run_preflight_checks():
 
     checks_passed = True
 
-    # Check container compose availability
     COMPOSE_CMD = await detect_compose_command()
     if COMPOSE_CMD:
         compose_name = " ".join(COMPOSE_CMD)
@@ -321,9 +341,9 @@ async def run_preflight_checks():
         print("   Install one of: docker compose, podman-compose, or docker-compose")
         checks_passed = False
 
-    # Check tsh installation and login status
-    if check_command_exists("tsh"):
-        print("✅ tsh is installed")
+    if check_command_available(
+        "tsh", "Install Teleport: https://goteleport.com/docs/installation/"
+    ):
         if check_tsh_logged_in():
             print("✅ Logged in to Teleport")
         else:
@@ -331,16 +351,11 @@ async def run_preflight_checks():
             print("   Log in with: tsh login --proxy=your-proxy.teleport.sh")
             checks_passed = False
     else:
-        print("❌ tsh is not installed")
-        print("   Install Teleport: https://goteleport.com/docs/installation/")
         checks_passed = False
 
-    # Check socat installation
-    if check_command_exists("socat"):
-        print("✅ socat is installed")
-    else:
-        print("❌ socat is not installed")
-        print("   Install with: sudo apt install socat  # or brew install socat")
+    if not check_command_available(
+        "socat", "Install with: sudo apt install socat  # or brew install socat"
+    ):
         checks_passed = False
 
     if not checks_passed:
@@ -370,6 +385,18 @@ def filter_databases(requested_names, databases):
     return filtered_dbs
 
 
+async def force_kill_process(proc_info: Dict[str, Any]) -> None:
+    """Force kill a process that didn't terminate gracefully."""
+    p = proc_info["process"]
+    if p.returncode is None:
+        print(f"⚠️  Force killing {proc_info['type']} for {proc_info['db_name']}")
+        p.kill()
+        try:
+            await asyncio.wait_for(p.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def cleanup(process_list: List[Dict[str, Any]]) -> None:
     """Centralized cleanup function."""
     print("🛑 Shutting down containers and tunnels...")
@@ -395,17 +422,10 @@ async def cleanup(process_list: List[Dict[str, Any]]) -> None:
             )
         except asyncio.TimeoutError:
             print("⚠️  Some processes did not terminate gracefully, force killing...")
-            for proc_info in process_list:
-                p = proc_info["process"]
-                if p.returncode is None:
-                    print(
-                        f"⚠️  Force killing {proc_info['type']} for {proc_info['db_name']}"
-                    )
-                    p.kill()
-                    try:
-                        await asyncio.wait_for(p.wait(), timeout=2)
-                    except asyncio.TimeoutError:
-                        pass
+            await asyncio.gather(
+                *[force_kill_process(proc_info) for proc_info in process_list],
+                return_exceptions=True,
+            )
 
     # Close log file handles
     for proc_info in process_list:
@@ -438,19 +458,18 @@ async def cleanup(process_list: List[Dict[str, Any]]) -> None:
 async def validate_processes_started(process_list: List[Dict[str, Any]]) -> None:
     """Validate all processes started successfully after a brief delay."""
     print("⏳ Validating process startup...")
-    await asyncio.sleep(2)  # Give processes time to fail if there's an issue
+    await asyncio.sleep(2)
 
-    failed_processes = []
-    for proc_info in process_list:
-        if proc_info["process"].returncode is not None:
-            failed_processes.append(proc_info)
+    failed_processes = [
+        proc_info
+        for proc_info in process_list
+        if proc_info["process"].returncode is not None
+    ]
 
     if failed_processes:
         failed_list = "\n".join(
-            [
-                f"   • {proc_info['type']} for {proc_info['db_name']} - check {proc_info['log_path']}"
-                for proc_info in failed_processes
-            ]
+            f"   • {proc_info['type']} for {proc_info['db_name']} - check {proc_info['log_path']}"
+            for proc_info in failed_processes
         )
         raise ProcessStartupError(
             f"The following processes failed to start:\n{failed_list}"
