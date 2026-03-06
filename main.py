@@ -45,8 +45,6 @@ class PreflightCheckError(OrchestratorError):
 COMPOSE_FILE = "compose.tsh.yml"
 SETTINGS_FILE = "settings.json"
 COMPOSE_CMD = None  # Will be set during pre-flight checks
-OPEN_FILE_HANDLES = []  # Track file handles for cleanup
-CLEANUP_INITIATED = False  # Track if cleanup has been called
 
 ADMINER_DRIVER_MAP = {
     "pgsql": "pgsql",
@@ -215,45 +213,26 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     # Create output directory and open log files with context management
     os.makedirs("output", exist_ok=True)
+
     tsh_log_path = f"output/{db['name']}_tsh.log"
     socat_log_path = f"output/{db['name']}_socat.log"
 
-    tsh_log = None
-    socat_log = None
+    tsh_log = open(tsh_log_path, "w")
+    socat_log = open(socat_log_path, "w")
+    tsh_p = None
 
     try:
-        tsh_log = open(tsh_log_path, "w")
-        OPEN_FILE_HANDLES.append(tsh_log)
-        socat_log = open(socat_log_path, "w")
-        OPEN_FILE_HANDLES.append(socat_log)
-
-        try:
-            tsh_p = await asyncio.create_subprocess_exec(
-                *tsh_cmd, stdout=tsh_log, stderr=tsh_log
-            )
-        except Exception as e:
-            print(f"❌ Failed to start tsh for {db['name']}: {e}")
-            raise
-
-        try:
-            socat_p = await asyncio.create_subprocess_exec(
-                *socat_cmd, stdout=socat_log, stderr=socat_log
-            )
-        except Exception as e:
-            print(f"❌ Failed to start socat for {db['name']}: {e}")
-            tsh_p.terminate()
-            raise
-
+        tsh_p = await asyncio.create_subprocess_exec(
+            *tsh_cmd, stdout=tsh_log, stderr=tsh_log
+        )
+        socat_p = await asyncio.create_subprocess_exec(
+            *socat_cmd, stdout=socat_log, stderr=socat_log
+        )
     except Exception:
-        # Close file handles that were opened
-        if tsh_log:
-            tsh_log.close()
-            if tsh_log in OPEN_FILE_HANDLES:
-                OPEN_FILE_HANDLES.remove(tsh_log)
-        if socat_log:
-            socat_log.close()
-            if socat_log in OPEN_FILE_HANDLES:
-                OPEN_FILE_HANDLES.remove(socat_log)
+        if tsh_p is not None:
+            tsh_p.terminate()
+        tsh_log.close()
+        socat_log.close()
         raise
 
     adminer_driver = ADMINER_DRIVER_MAP[db["db_system"]]
@@ -278,28 +257,21 @@ async def start_project_tunnels(db: Dict[str, Any]) -> List[Dict[str, Any]]:
             "db_name": db["name"],
             "type": "tsh",
             "log_path": tsh_log_path,
+            "log_file": tsh_log,
         },
         {
             "process": socat_p,
             "db_name": db["name"],
             "type": "socat",
             "log_path": socat_log_path,
+            "log_file": socat_log,
         },
     ]
 
 
 def check_command_exists(command):
     """Check if a command is available in the system."""
-    try:
-        subprocess.run(
-            ["which", command],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
-        return True
-    except subprocess.CalledProcessError:
-        return False
+    return shutil.which(command) is not None
 
 
 async def detect_compose_command() -> Optional[List[str]]:
@@ -426,19 +398,13 @@ def filter_databases(requested_names, databases):
 
 async def cleanup(process_list: List[Dict[str, Any]]) -> None:
     """Centralized cleanup function."""
-    global CLEANUP_INITIATED
-
-    # Check if cleanup already called to prevent double execution
-    if CLEANUP_INITIATED:
-        return
-    CLEANUP_INITIATED = True
-
     print("🛑 Shutting down containers and tunnels...")
+
     if not process_list:
         print("⚠️  No processes to clean up")
         return
 
-    # Terminate all processes first
+    # Terminate all processes
     terminate_tasks = []
     for proc_info in process_list:
         p = proc_info["process"]
@@ -467,36 +433,32 @@ async def cleanup(process_list: List[Dict[str, Any]]) -> None:
                     except asyncio.TimeoutError:
                         pass
 
+    # Close log file handles
+    for proc_info in process_list:
+        if "log_file" in proc_info:
+            try:
+                proc_info["log_file"].close()
+            except Exception:
+                pass
+
     # Shut down containers
-    compose_log = open("output/compose.log", "a")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *COMPOSE_CMD,
-            "-f",
-            COMPOSE_FILE,
-            "down",
-            stdout=compose_log,
-            stderr=compose_log,
-        )
-        await asyncio.wait_for(proc.communicate(), timeout=30)
-    except asyncio.TimeoutError:
-        print("⚠️  Compose down timed out")
-        proc.kill()
-    finally:
-        compose_log.close()
-
-    # Close file handles asynchronously
-    close_tasks = []
-    for fh in OPEN_FILE_HANDLES:
-        try:
-            # Schedule file close in executor to avoid blocking
-            close_tasks.append(asyncio.get_event_loop().run_in_executor(None, fh.close))
-        except Exception:
-            pass
-
-    # Wait for all file closes to complete
-    if close_tasks:
-        await asyncio.gather(*close_tasks, return_exceptions=True)
+    if COMPOSE_CMD:
+        with open("output/compose.log", "a") as compose_log:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *COMPOSE_CMD,
+                    "-f",
+                    COMPOSE_FILE,
+                    "down",
+                    stdout=compose_log,
+                    stderr=compose_log,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                print("⚠️  Compose down timed out")
+                proc.kill()
+            except Exception as e:
+                print(f"⚠️  Error during compose down: {e}")
 
 
 async def validate_processes_started(process_list: List[Dict[str, Any]]) -> None:
@@ -523,7 +485,6 @@ async def validate_processes_started(process_list: List[Dict[str, Any]]) -> None
 
 async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
     """Main execution loop."""
-    process_list = []
 
     is_shutdown = False
 
@@ -557,23 +518,22 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
 
         # Start Container Compose
         print("🚀 Starting Adminer containers...")
-        compose_log = open("output/compose.log", "a")
-
-        proc = await asyncio.create_subprocess_exec(
-            *COMPOSE_CMD,
-            "-f",
-            COMPOSE_FILE,
-            "up",
-            "-d",
-            stdout=compose_log,
-            stderr=compose_log,
-        )
-        await proc.communicate()
-        compose_log.close()
+        with open("output/compose.log", "a") as compose_log:
+            proc = await asyncio.create_subprocess_exec(
+                *COMPOSE_CMD,
+                "-f",
+                COMPOSE_FILE,
+                "up",
+                "-d",
+                stdout=compose_log,
+                stderr=compose_log,
+            )
+            await proc.communicate()
 
         # Start Tunnels and Relays
         print("🔗 Establishing tunnels and port forwarding...")
 
+        process_list = []
         for db in selected_databases:
             try:
                 process_list.extend(await start_project_tunnels(db))
@@ -611,11 +571,12 @@ async def run_orchestrator(selected_databases: List[Dict[str, Any]]) -> None:
         for completed_task in done:
             proc_info = wait_tasks[completed_task]
             exit_code = await completed_task
-            raise ProcessStartupError(
+            raise OrchestratorError(
                 f"{proc_info['type']} process for '{proc_info['db_name']}' failed with exit code {exit_code}. "
                 f"Check log file: {proc_info['log_path']}"
             )
-    except Exception:
+    except Exception as e:
+        print(f"❌ {e}")
         raise
     finally:
         await cleanup(process_list)
@@ -641,8 +602,7 @@ if __name__ == "__main__":
         # Run orchestrator with selected databases
         asyncio.run(run_orchestrator(selected_databases))
         sys.exit(0)
-    except OrchestratorError as e:
-        print(f"❌ {e}")
+    except OrchestratorError:
         sys.exit(1)
     except KeyboardInterrupt:
         # User interrupted - already handled by signal handler
