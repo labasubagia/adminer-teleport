@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import asyncio
+import re
 from typing import List, Dict, Any, Optional, TextIO
 from urllib.parse import urlencode
 from dataclasses import dataclass
@@ -45,12 +46,28 @@ class Database:
     adminer_port: int
     db_name: Optional[str] = None
 
+    HIDDEN_PORT_OFFSET = 1000
+
+    ADMINER_DRIVER_MAP = {
+        "pgsql": "pgsql",
+        "mysql": "server",
+    }
+
+    REQUIRED_FIELDS = [
+        "name",
+        "cluster",
+        "db_system",
+        "db_user",
+        "bridge_port",
+        "adminer_port",
+    ]
+
     def __post_init__(self):
         """Validate database configuration after initialization."""
-        if self.db_system not in ADMINER_DRIVER_MAP:
+        if self.db_system not in self.ADMINER_DRIVER_MAP:
             raise ConfigurationError(
                 f"Invalid db_system '{self.db_system}' for database '{self.name}'. "
-                f"Supported systems: {', '.join(ADMINER_DRIVER_MAP.keys())}"
+                f"Supported systems: {', '.join(self.ADMINER_DRIVER_MAP.keys())}"
             )
 
         for port_field, port_value in [
@@ -63,18 +80,47 @@ class Database:
                     f"Port must be an integer between 1 and 65535"
                 )
 
-        hidden_port = get_hidden_port(self.bridge_port)
-        if hidden_port > 65535:
+        if self.hidden_port > 65535:
             raise ConfigurationError(
                 f"Invalid bridge_port '{self.bridge_port}' for database '{self.name}'. "
-                f"Hidden port ({hidden_port}) would exceed 65535. Use bridge_port <= {65535 - HIDDEN_PORT_OFFSET}"
+                f"Hidden port ({self.hidden_port}) would exceed 65535. Use bridge_port <= {65535 - self.HIDDEN_PORT_OFFSET}"
             )
+
+    @property
+    def hidden_port(self) -> int:
+        """Calculate the hidden port for tsh tunnel."""
+        return self.bridge_port + self.HIDDEN_PORT_OFFSET
+
+    @property
+    def service_name(self) -> str:
+        """Get sanitized service name for Docker Compose.
+
+        Only alphanumeric characters, hyphens, and underscores are allowed.
+        Invalid characters are replaced with underscores.
+        """
+        return re.sub(r"[^a-zA-Z0-9_-]", "_", self.name)
+
+    @property
+    def adminer_url(self) -> str:
+        """Build the Adminer URL with query parameters for the database."""
+        adminer_driver = self.ADMINER_DRIVER_MAP[self.db_system]
+        query_map = {
+            adminer_driver: f"host.containers.internal:{self.bridge_port}",
+            "username": self.db_user,
+        }
+        if self.db_name:
+            query_map["db"] = self.db_name
+
+        query_params = urlencode(query_map)
+        return f"http://localhost:{self.adminer_port}/?{query_params}"
 
     @classmethod
     def from_dict(cls, db_dict: Dict[str, Any], idx: int) -> "Database":
         """Create a Database instance from a dictionary with validation."""
         missing_fields = [
-            field_name for field_name in REQUIRED_DB_FIELDS if field_name not in db_dict
+            field_name
+            for field_name in cls.REQUIRED_FIELDS
+            if field_name not in db_dict
         ]
         if missing_fields:
             raise ConfigurationError(
@@ -101,6 +147,19 @@ class ProcessInfo:
     type: str
     log_file: TextIO
 
+    @classmethod
+    def compute_log_path(cls, db_name: str, process_type: str) -> str:
+        """Compute log file path for a given database and process type.
+
+        Args:
+            db_name: Name of the database
+            process_type: Type of process ('tsh' or 'socat')
+
+        Returns:
+            Full path to the log file
+        """
+        return os.path.join(OUTPUT_DIR, f"{db_name}_{process_type}.log")
+
 
 COMPOSE_FILE = "compose.yml"
 SETTINGS_PATH = os.getenv(
@@ -109,22 +168,6 @@ SETTINGS_PATH = os.getenv(
 OUTPUT_DIR = os.getenv(
     "ADMINER_TELEPORT_OUTPUT_DIR", os.path.join(os.getcwd(), "output")
 )
-COMPOSE_CMD = None  # Will be set during pre-flight checks
-HIDDEN_PORT_OFFSET = 1000
-
-ADMINER_DRIVER_MAP = {
-    "pgsql": "pgsql",
-    "mysql": "server",
-}
-
-REQUIRED_DB_FIELDS = [
-    "name",
-    "cluster",
-    "db_system",
-    "db_user",
-    "bridge_port",
-    "adminer_port",
-]
 
 
 def load_settings() -> List[Database]:
@@ -152,33 +195,23 @@ def load_settings() -> List[Database]:
     for idx, db_dict in enumerate(settings["databases"]):
         databases.append(Database.from_dict(db_dict, idx))
 
+    # Check for duplicate database names
+    names = [db.name for db in databases]
+    if len(names) != len(set(names)):
+        duplicates = [name for name in names if names.count(name) > 1]
+        raise ConfigurationError(
+            f"Duplicate database names found: {', '.join(set(duplicates))}"
+        )
+
     return databases
 
 
-def get_hidden_port(bridge_port: int) -> int:
-    return bridge_port + HIDDEN_PORT_OFFSET
-
-
-def build_adminer_url(db: Database) -> str:
-    """Build the Adminer URL with query parameters for the database."""
-    adminer_driver = ADMINER_DRIVER_MAP[db.db_system]
-    query_map = {
-        adminer_driver: f"host.containers.internal:{db.bridge_port}",
-        "username": db.db_user,
-    }
-    if db.db_name:
-        query_map["db"] = db.db_name
-
-    query_params = urlencode(query_map)
-    return f"http://localhost:{db.adminer_port}/?{query_params}"
-
-
-def print_database_info(db: Database, hidden_port: int, adminer_url: str) -> None:
+def print_database_info(db: Database) -> None:
     """Print connection information for a database."""
     print(f"🔗 [{db.name}]")
-    print(f"   - Tunnel: {db.bridge_port} → {hidden_port}")
+    print(f"   - Tunnel: {db.bridge_port} → {db.hidden_port}")
     print(f"   - Database: {db.db_system.upper()} (user: {db.db_user})")
-    print(f"   - Adminer: {adminer_url}")
+    print(f"   - Adminer: {db.adminer_url}")
 
 
 def is_port_available(port, host="127.0.0.1"):
@@ -199,7 +232,7 @@ def check_all_ports(databases: List[Database]) -> None:
     for db in databases:
         ports_to_check = [
             ("bridge_port", db.bridge_port),
-            ("hidden_port", get_hidden_port(db.bridge_port)),
+            ("hidden_port", db.hidden_port),
             ("adminer_port", db.adminer_port),
         ]
         for port_type, port in ports_to_check:
@@ -223,8 +256,7 @@ def generate_compose_file(databases: List[Database]) -> None:
     compose_dict = {"services": {}, "networks": {"adminer_net": {"driver": "bridge"}}}
 
     for db in databases:
-        service_name = db.name.replace("-", "_")
-        compose_dict["services"][service_name] = {
+        compose_dict["services"][db.service_name] = {
             "image": "adminer",
             "restart": "unless-stopped",
             "ports": [f"{db.adminer_port}:8080"],
@@ -244,15 +276,13 @@ def generate_compose_file(databases: List[Database]) -> None:
 
 async def start_project_tunnels(db: Database) -> List[ProcessInfo]:
     """Starts the tsh tunnel and the socat relay."""
-    hidden_port = get_hidden_port(db.bridge_port)
-
     # Build tsh command
     tsh_cmd = [
         "tsh",
         "proxy",
         "db",
         "--tunnel",
-        f"--port={hidden_port}",
+        f"--port={db.hidden_port}",
         f"--db-user={db.db_user}",
     ]
     if db.db_name:
@@ -263,18 +293,15 @@ async def start_project_tunnels(db: Database) -> List[ProcessInfo]:
     socat_cmd = [
         "socat",
         f"TCP-LISTEN:{db.bridge_port},fork,reuseaddr",
-        f"TCP:127.0.0.1:{hidden_port}",
+        f"TCP:127.0.0.1:{db.hidden_port}",
     ]
 
     # Create output directory and open log files
     # Note: Files remain open and are closed later in cleanup()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    tsh_log_path = os.path.join(OUTPUT_DIR, f"{db.name}_tsh.log")
-    socat_log_path = os.path.join(OUTPUT_DIR, f"{db.name}_socat.log")
-
-    tsh_log = open(tsh_log_path, "w")
-    socat_log = open(socat_log_path, "w")
+    tsh_log = open(ProcessInfo.compute_log_path(db.name, "tsh"), "w")
+    socat_log = open(ProcessInfo.compute_log_path(db.name, "socat"), "w")
     tsh_p = None
 
     try:
@@ -287,12 +314,12 @@ async def start_project_tunnels(db: Database) -> List[ProcessInfo]:
     except Exception:
         if tsh_p is not None:
             tsh_p.terminate()
+            await tsh_p.wait()
         tsh_log.close()
         socat_log.close()
         raise
 
-    adminer_url = build_adminer_url(db)
-    print_database_info(db, hidden_port, adminer_url)
+    print_database_info(db)
 
     return [
         ProcessInfo(
@@ -310,7 +337,7 @@ async def start_project_tunnels(db: Database) -> List[ProcessInfo]:
     ]
 
 
-def check_command_exists(command):
+def check_command_exists(command: str) -> bool:
     """Check if a command is available in the system."""
     return shutil.which(command) is not None
 
@@ -369,17 +396,19 @@ def check_tsh_logged_in():
         return False
 
 
-async def run_preflight_checks():
-    """Verify all prerequisites before starting the orchestrator."""
-    global COMPOSE_CMD
+async def run_preflight_checks() -> Optional[List[str]]:
+    """Verify all prerequisites before starting the orchestrator.
 
+    Returns:
+        The detected compose command as a list of strings.
+    """
     print("🔍 Running pre-flight checks...")
 
     checks_passed = True
 
-    COMPOSE_CMD = await detect_compose_command()
-    if COMPOSE_CMD:
-        compose_name = " ".join(COMPOSE_CMD)
+    compose_cmd = await detect_compose_command()
+    if compose_cmd:
+        compose_name = " ".join(compose_cmd)
         print(f"✅ Container runtime found: {compose_name}")
     else:
         print("❌ No container compose tool found")
@@ -407,6 +436,8 @@ async def run_preflight_checks():
         raise PreflightCheckError(
             "Pre-flight checks failed. Please resolve the issues above."
         )
+
+    return compose_cmd
 
 
 def filter_databases(
@@ -444,8 +475,15 @@ async def force_kill_process(proc_info: ProcessInfo) -> None:
             pass
 
 
-async def cleanup(process_list: List[ProcessInfo]) -> None:
-    """Centralized cleanup function."""
+async def cleanup(
+    process_list: List[ProcessInfo], compose_cmd: Optional[List[str]] = None
+) -> None:
+    """Centralized cleanup function.
+
+    Args:
+        process_list: List of processes to terminate.
+        compose_cmd: The compose command to use for shutting down containers.
+    """
     print("🛑 Shutting down containers and tunnels...")
 
     if not process_list:
@@ -482,12 +520,12 @@ async def cleanup(process_list: List[ProcessInfo]) -> None:
             pass
 
     # Shut down containers
-    if COMPOSE_CMD:
+    if compose_cmd:
         compose_log_path = os.path.join(OUTPUT_DIR, "compose.log")
         with open(compose_log_path, "a") as compose_log:
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    *COMPOSE_CMD,
+                    *compose_cmd,
                     "-f",
                     COMPOSE_FILE,
                     "down",
@@ -526,12 +564,11 @@ async def validate_processes_started(process_list: List[ProcessInfo]) -> None:
 async def run_orchestrator(selected_databases: List[Database]) -> None:
     """Main execution loop."""
 
-    is_shutdown = False
+    shutdown_event = asyncio.Event()
     process_list: List[ProcessInfo] = []
 
     def signal_handler_sync():
-        nonlocal is_shutdown
-        is_shutdown = True
+        shutdown_event.set()
 
     loop = asyncio.get_event_loop()
     loop.add_signal_handler(signal.SIGINT, signal_handler_sync)
@@ -539,7 +576,7 @@ async def run_orchestrator(selected_databases: List[Database]) -> None:
 
     try:
         # Run pre-flight checks
-        await run_preflight_checks()
+        compose_cmd = await run_preflight_checks()
 
         # Remove and recreate output directory for clean logs
         if os.path.exists(OUTPUT_DIR):
@@ -562,7 +599,7 @@ async def run_orchestrator(selected_databases: List[Database]) -> None:
         compose_log_path = os.path.join(OUTPUT_DIR, "compose.log")
         with open(compose_log_path, "w") as compose_log:
             proc = await asyncio.create_subprocess_exec(
-                *COMPOSE_CMD,
+                *compose_cmd,
                 "-f",
                 COMPOSE_FILE,
                 "up",
@@ -571,6 +608,10 @@ async def run_orchestrator(selected_databases: List[Database]) -> None:
                 stderr=compose_log,
             )
             await proc.communicate()
+            if proc.returncode != 0:
+                raise ProcessStartupError(
+                    f"Container compose failed to start (exit code {proc.returncode}). Check {compose_log_path}"
+                )
 
         # Start Tunnels and Relays
         print("🔗 Establishing tunnels and port forwarding...")
@@ -603,7 +644,7 @@ async def run_orchestrator(selected_databases: List[Database]) -> None:
             task.cancel()
 
         # Check if it was triggered by shutdown signal
-        if is_shutdown:
+        if shutdown_event.is_set():
             return
 
         # A process failed - find which one and handle it
@@ -618,7 +659,7 @@ async def run_orchestrator(selected_databases: List[Database]) -> None:
         print(f"❌ {e}")
         raise
     finally:
-        await cleanup(process_list)
+        await cleanup(process_list, compose_cmd)
 
 
 if __name__ == "__main__":
