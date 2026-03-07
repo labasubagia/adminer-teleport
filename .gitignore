@@ -1,4 +1,42 @@
+# Byte-code files
+*.pyc
+__pycache__
+.pytest_cache/
+
+# Distributions and packaging
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+
+# Virtual environment
+venv
 .venv
+env/
+.env/
+# Uncomment the following line if you prefer to ignore the entire .vscode folder (VS Code specific)
+# .vscode/ 
+
+# Editors and IDEs
+.idea/  # JetBrains IDEs (PyCharm, etc)
+*.swp
+*~
+.DS_Store  # macOS files
+
+# Testing and coverage
+.coverage
+htmlcov/
+
+# Data and logs (optional, depends on project)
+*.log
+local_data/
+
+# Ruff cache
+.ruff_cache/
+
+# Project files
 compose.yml
 settings.json
 output/
