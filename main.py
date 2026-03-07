@@ -172,7 +172,6 @@ class Database:
             },
             "volumes": ["./plugins-enabled:/var/www/html/plugins-enabled:ro"],
             "extra_hosts": ["host.containers.internal:host-gateway"],
-            "networks": ["adminer_net"],
         }
 
     @classmethod
@@ -311,7 +310,7 @@ def check_all_ports(databases: List[Database]) -> None:
 
 def generate_compose_file(databases: List[Database]) -> None:
     """Generates a compose file based on the DATABASES list."""
-    compose_dict = {"services": {}, "networks": {"adminer_net": {"driver": "bridge"}}}
+    compose_dict = {"services": {}}
 
     for db in databases:
         compose_dict["services"][db.service_name] = db.to_compose_service()
