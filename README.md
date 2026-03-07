@@ -38,7 +38,7 @@ This will:
 
 ## Configuration
 
-Database configurations are stored in `settings.json` (git-ignored). Create this file from the provided template:
+Database configurations are stored in `settings.json` (git-ignored) by default. Create this file from the provided template:
 
 ```bash
 cp settings.example.json settings.json
@@ -71,6 +71,20 @@ Then edit `settings.json` to configure your databases:
 ```
 
 **Note**: The `db_name` field is optional but **strongly recommended**. Some newer versions of Teleport require it (especially when connecting to PostgreSQL databases). If omitted, the `--db-name` argument won't be passed to the `tsh proxy db` command.
+
+### Environment Variables
+
+You can customize file paths using environment variables:
+
+- **ADMINER_TELEPORT_SETTING_PATH**: Path to settings file (default: `./settings.json`)
+- **ADMINER_TELEPORT_OUTPUT_DIR**: Directory for log files (default: `./output`)
+
+Example:
+```bash
+export ADMINER_TELEPORT_SETTING_PATH=/path/to/custom/settings.json
+export ADMINER_TELEPORT_OUTPUT_DIR=/tmp/adminer-logs
+uv run main.py
+```
 
 ### Configuration Validation
 
@@ -131,7 +145,7 @@ Click the Adminer URL or navigate to it in your browser.
 
 1. **Pre-flight Checks**: Verifies container runtime, `tsh`, `socat` are installed, and Teleport is logged in
 2. **Port Check**: Validates all required ports are available
-3. **Compose Generation**: Creates `compose.tsh.yml` with Adminer container configs
+3. **Compose Generation**: Creates `compose.yml` with Adminer container configs
 4. **Container Startup**: Launches Adminer containers via detected compose tool
 5. **Tunnel Creation**: For each database:
    - Starts `tsh proxy db --tunnel` on hidden_port
@@ -239,25 +253,25 @@ Only `pgsql` and `mysql` are supported.
 Check container status (replace with your compose command):
 ```bash
 # Docker Compose v2
-docker compose -f compose.tsh.yml ps
+docker compose -f compose.yml ps
 
 # Podman Compose
-podman-compose -f compose.tsh.yml ps
+podman-compose -f compose.yml ps
 
 # Docker Compose v1
-docker-compose -f compose.tsh.yml ps
+docker-compose -f compose.yml ps
 ```
 
 View logs:
 ```bash
 # Docker Compose v2
-docker compose -f compose.tsh.yml logs
+docker compose -f compose.yml logs
 
 # Podman Compose
-podman-compose -f compose.tsh.yml logs
+podman-compose -f compose.yml logs
 
 # Docker Compose v1
-docker-compose -f compose.tsh.yml logs
+docker-compose -f compose.yml logs
 ```
 
 ## Customization
@@ -282,9 +296,10 @@ The included `login-password-less.php` plugin enables login using a fixed passwo
 
 ## Logs
 
-Process logs are automatically captured in the `output/` directory:
-- `output/{database_name}_tsh.out` - Teleport tunnel logs
-- `output/{database_name}_socat.out` - socat relay logs
+Process logs are automatically captured in the `output/` directory (configurable via `ADMINER_TELEPORT_OUTPUT_DIR`):
+- `output/{database_name}_tsh.log` - Teleport tunnel logs
+- `output/{database_name}_socat.log` - socat relay logs
+- `output/compose.log` - Container compose logs
 
 These logs are useful for debugging connection issues or monitoring tunnel activity.
 
@@ -295,10 +310,11 @@ These logs are useful for debugging connection issues or monitoring tunnel activ
 ├── main.py                      # Main orchestrator script
 ├── settings.json                # Database configurations (git-ignored)
 ├── settings.example.json        # Configuration template
-├── compose.tsh.yml              # Auto-generated compose file (git-ignored)
+├── compose.yml                  # Auto-generated compose file (git-ignored)
 ├── output/                      # Process logs directory (git-ignored)
-│   ├── {db_name}_tsh.out       # Teleport tunnel stdout/stderr
-│   └── {db_name}_socat.out     # socat relay stdout/stderr
+│   ├── {db_name}_tsh.log       # Teleport tunnel stdout/stderr
+│   ├── {db_name}_socat.log     # socat relay stdout/stderr
+│   └── compose.log              # Container compose logs
 ├── plugins-enabled/             # Adminer plugins
 │   └── login-password-less.php  # Passwordless login plugin
 └── README.md                    # This file
