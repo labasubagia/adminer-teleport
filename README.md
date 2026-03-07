@@ -1,6 +1,24 @@
 # Adminer with Teleport Proxy
 
+**Version**: 0.1.0
+
 Orchestrator for running Adminer instances with Teleport database proxy tunnels. This tool automatically sets up secure database connections through Teleport and provides web-based database management via Adminer.
+
+## Table of Contents
+
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [How It Works](#how-it-works)
+- [Stopping](#stopping)
+- [Troubleshooting](#troubleshooting)
+- [Customization](#customization)
+- [Logs](#logs)
+- [Module Architecture](#module-architecture)
+- [Project Structure](#project-structure)
+- [License](#license)
 
 ## Features
 
@@ -303,14 +321,36 @@ Process logs are automatically captured in the `output/` directory (configurable
 
 These logs are useful for debugging connection issues or monitoring tunnel activity.
 
-## File Structure
+## Module Architecture
+
+The project is organized into a Python package (`adminer_teleport`) with the following modules:
+
+- **`orchestrator.py`**: Core orchestration logic that manages the lifecycle of database tunnels and Adminer containers. Handles startup, shutdown, and signal handling.
+- **`models.py`**: Data models including `Database` (database configuration) and `ProcessInfo` (running process tracking).
+- **`config.py`**: Configuration loading, validation, and environment variable handling. Reads and validates `settings.json`.
+- **`compose.py`**: Generates Docker Compose or Podman Compose configuration files dynamically based on database configurations.
+- **`utils.py`**: Utility functions for pre-flight checks (verifying `tsh`, `socat`, container runtime) and port availability checking.
+- **`exceptions.py`**: Custom exception classes for error handling (`OrchestratorError`, `ProcessStartupError`, etc.).
+
+The entry point (`main.py`) is kept minimal and delegates to the orchestrator module.
+
+## Project Structure
 
 ```
 .
-├── main.py                      # Main orchestrator script
+├── main.py                      # Entry point for the orchestrator
+├── pyproject.toml               # Project metadata and dependencies (uv)
 ├── settings.json                # Database configurations (git-ignored)
 ├── settings.example.json        # Configuration template
 ├── compose.yml                  # Auto-generated compose file (git-ignored)
+├── adminer_teleport/            # Main Python package
+│   ├── __init__.py             # Package initialization
+│   ├── orchestrator.py         # Core orchestration logic
+│   ├── models.py               # Data models (Database, ProcessInfo)
+│   ├── config.py               # Configuration loading and validation
+│   ├── compose.py              # Docker/Podman compose file generation
+│   ├── utils.py                # Utility functions (pre-flight checks, port checking)
+│   └── exceptions.py           # Custom exception classes
 ├── output/                      # Process logs directory (git-ignored)
 │   ├── {db_name}_tsh.log       # Teleport tunnel stdout/stderr
 │   ├── {db_name}_socat.log     # socat relay stdout/stderr
