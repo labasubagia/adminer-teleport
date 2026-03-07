@@ -114,6 +114,67 @@ class Database:
         query_params = urlencode(query_map)
         return f"http://localhost:{self.adminer_port}/?{query_params}"
 
+    def check_ports_available(self) -> List[tuple[str, int]]:
+        """Check if all ports for this database are available.
+
+        Returns:
+            List of (port_type, port) tuples for ports that are unavailable.
+        """
+        unavailable = []
+        for port_type, port in [
+            ("bridge_port", self.bridge_port),
+            ("hidden_port", self.hidden_port),
+            ("adminer_port", self.adminer_port),
+        ]:
+            if not is_port_available(port):
+                unavailable.append((port_type, port))
+        return unavailable
+
+    def print_info(self) -> None:
+        """Print connection information for this database."""
+        print(f"🔗 [{self.name}]")
+        print(f"   - Tunnel: {self.bridge_port} → {self.hidden_port}")
+        print(f"   - Database: {self.db_system.upper()} (user: {self.db_user})")
+        print(f"   - Adminer: {self.adminer_url}")
+
+    def build_tsh_command(self) -> List[str]:
+        """Build the tsh tunnel command for this database."""
+        cmd = [
+            "tsh",
+            "proxy",
+            "db",
+            "--tunnel",
+            f"--port={self.hidden_port}",
+            f"--db-user={self.db_user}",
+        ]
+        if self.db_name:
+            cmd.append(f"--db-name={self.db_name}")
+        cmd.append(self.cluster)
+        return cmd
+
+    def build_socat_command(self) -> List[str]:
+        """Build the socat relay command for this database."""
+        return [
+            "socat",
+            f"TCP-LISTEN:{self.bridge_port},fork,reuseaddr",
+            f"TCP:127.0.0.1:{self.hidden_port}",
+        ]
+
+    def to_compose_service(self) -> Dict[str, Any]:
+        """Generate the Docker Compose service definition for this database."""
+        return {
+            "image": "adminer",
+            "restart": "unless-stopped",
+            "ports": [f"{self.adminer_port}:8080"],
+            "environment": {
+                "ADMINER_DESIGN": "hever",
+                "ADMINER_DEFAULT_SERVER": f"host.containers.internal:{self.bridge_port}",
+            },
+            "volumes": ["./plugins-enabled:/var/www/html/plugins-enabled:ro"],
+            "extra_hosts": ["host.containers.internal:host-gateway"],
+            "networks": ["adminer_net"],
+        }
+
     @classmethod
     def from_dict(cls, db_dict: Dict[str, Any], idx: int) -> "Database":
         """Create a Database instance from a dictionary with validation."""
@@ -159,6 +220,16 @@ class ProcessInfo:
             Full path to the log file
         """
         return os.path.join(OUTPUT_DIR, f"{db_name}_{process_type}.log")
+
+    async def force_kill(self) -> None:
+        """Force kill this process if it didn't terminate gracefully."""
+        if self.process.returncode is None:
+            print(f"⚠️  Force killing {self.type} for {self.db_name}")
+            self.process.kill()
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                pass
 
 
 COMPOSE_FILE = "compose.yml"
@@ -206,14 +277,6 @@ def load_settings() -> List[Database]:
     return databases
 
 
-def print_database_info(db: Database) -> None:
-    """Print connection information for a database."""
-    print(f"🔗 [{db.name}]")
-    print(f"   - Tunnel: {db.bridge_port} → {db.hidden_port}")
-    print(f"   - Database: {db.db_system.upper()} (user: {db.db_user})")
-    print(f"   - Adminer: {db.adminer_url}")
-
-
 def is_port_available(port, host="127.0.0.1"):
     """Check if a port is available for binding."""
     try:
@@ -230,14 +293,9 @@ def check_all_ports(databases: List[Database]) -> None:
     unavailable_ports = []
 
     for db in databases:
-        ports_to_check = [
-            ("bridge_port", db.bridge_port),
-            ("hidden_port", db.hidden_port),
-            ("adminer_port", db.adminer_port),
-        ]
-        for port_type, port in ports_to_check:
-            if not is_port_available(port):
-                unavailable_ports.append((db.name, port_type, port))
+        db_unavailable = db.check_ports_available()
+        for port_type, port in db_unavailable:
+            unavailable_ports.append((db.name, port_type, port))
 
     if unavailable_ports:
         port_list = "\n".join(
@@ -256,45 +314,18 @@ def generate_compose_file(databases: List[Database]) -> None:
     compose_dict = {"services": {}, "networks": {"adminer_net": {"driver": "bridge"}}}
 
     for db in databases:
-        compose_dict["services"][db.service_name] = {
-            "image": "adminer",
-            "restart": "unless-stopped",
-            "ports": [f"{db.adminer_port}:8080"],
-            "environment": {
-                "ADMINER_DESIGN": "hever",
-                "ADMINER_DEFAULT_SERVER": f"host.containers.internal:{db.bridge_port}",
-            },
-            "volumes": ["./plugins-enabled:/var/www/html/plugins-enabled:ro"],
-            "extra_hosts": ["host.containers.internal:host-gateway"],
-            "networks": ["adminer_net"],
-        }
+        compose_dict["services"][db.service_name] = db.to_compose_service()
 
     with open(COMPOSE_FILE, "w") as f:
         yaml.dump(compose_dict, f, default_flow_style=False)
     print(f"✅ {COMPOSE_FILE} synchronized.")
 
 
-async def start_project_tunnels(db: Database) -> List[ProcessInfo]:
+async def start_db_tunnel(db: Database) -> List[ProcessInfo]:
     """Starts the tsh tunnel and the socat relay."""
-    # Build tsh command
-    tsh_cmd = [
-        "tsh",
-        "proxy",
-        "db",
-        "--tunnel",
-        f"--port={db.hidden_port}",
-        f"--db-user={db.db_user}",
-    ]
-    if db.db_name:
-        tsh_cmd.append(f"--db-name={db.db_name}")
-    tsh_cmd.append(db.cluster)
-
-    # Build socat command
-    socat_cmd = [
-        "socat",
-        f"TCP-LISTEN:{db.bridge_port},fork,reuseaddr",
-        f"TCP:127.0.0.1:{db.hidden_port}",
-    ]
+    # Build commands using Database methods
+    tsh_cmd = db.build_tsh_command()
+    socat_cmd = db.build_socat_command()
 
     # Create output directory and open log files
     # Note: Files remain open and are closed later in cleanup()
@@ -319,7 +350,7 @@ async def start_project_tunnels(db: Database) -> List[ProcessInfo]:
         socat_log.close()
         raise
 
-    print_database_info(db)
+    db.print_info()
 
     return [
         ProcessInfo(
@@ -463,18 +494,6 @@ def filter_databases(
     return filtered_dbs
 
 
-async def force_kill_process(proc_info: ProcessInfo) -> None:
-    """Force kill a process that didn't terminate gracefully."""
-    p = proc_info.process
-    if p.returncode is None:
-        print(f"⚠️  Force killing {proc_info.type} for {proc_info.db_name}")
-        p.kill()
-        try:
-            await asyncio.wait_for(p.wait(), timeout=2)
-        except asyncio.TimeoutError:
-            pass
-
-
 async def cleanup(
     process_list: List[ProcessInfo], compose_cmd: Optional[List[str]] = None
 ) -> None:
@@ -508,7 +527,7 @@ async def cleanup(
         except asyncio.TimeoutError:
             print("⚠️  Some processes did not terminate gracefully, force killing...")
             await asyncio.gather(
-                *[force_kill_process(proc_info) for proc_info in process_list],
+                *[proc_info.force_kill() for proc_info in process_list],
                 return_exceptions=True,
             )
 
@@ -618,7 +637,7 @@ async def run_orchestrator(selected_databases: List[Database]) -> None:
 
         for db in selected_databases:
             try:
-                process_list.extend(await start_project_tunnels(db))
+                process_list.extend(await start_db_tunnel(db))
             except Exception as e:
                 raise ProcessStartupError(f"Failed to start tunnels for {db.name}: {e}")
 
